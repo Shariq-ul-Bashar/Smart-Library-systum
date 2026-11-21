@@ -1,0 +1,6 @@
+{
+  "name": "SHARIXA",
+  "description": "One Platform. Every Library. Multi-tenant Library Management SaaS for colleges and universities.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
