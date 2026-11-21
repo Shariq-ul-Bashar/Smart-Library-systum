@@ -158,6 +158,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    setApiOrganizationId(null);
+    setUser(null);
+    setMemberships([]);
+    setActiveWorkspace(null);
     try {
       if (auth.currentUser) {
         await signOut(auth);
@@ -165,10 +169,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore signOut errors
     }
-    setApiOrganizationId(null);
-    setUser(null);
-    setMemberships([]);
-    setActiveWorkspace(null);
   };
 
   const selectWorkspace = (ws: ActiveWorkspace) => {

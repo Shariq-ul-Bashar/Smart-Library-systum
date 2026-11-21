@@ -282,7 +282,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }>;
         unreadCount: number;
       }>('/org/notifications'),
-    enabled: Boolean(user),
+    enabled: Boolean(user?.uid),
+    retry: false,
     refetchInterval: 30000,
   });
 

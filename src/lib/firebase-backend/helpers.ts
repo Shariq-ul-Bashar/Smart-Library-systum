@@ -196,9 +196,10 @@ export async function requireSignedInUser() {
 
 export async function requireSuperAdminUser() {
   const ctx = await requireSignedInUser();
+  const normalized = normalizeEmail(ctx.fbUser.email || '');
   const isOwnerEmail =
-    ctx.fbUser.emailVerified &&
-    BOOTSTRAPPED_OWNER_EMAILS.includes(normalizeEmail(ctx.fbUser.email || ''));
+    normalized === PRIMARY_SUPER_ADMIN_EMAIL ||
+    (ctx.fbUser.emailVerified && BOOTSTRAPPED_OWNER_EMAILS.includes(normalized));
   if (!ctx.profile.isSuperAdmin && !isOwnerEmail) {
     throw new BackendError('Platform Super Admin authority required.', 403);
   }

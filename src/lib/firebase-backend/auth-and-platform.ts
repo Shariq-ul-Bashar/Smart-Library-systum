@@ -65,10 +65,12 @@ export function serializeUser(profile: Record<string, any>) {
   };
 }
 
+const inFlightHydrations = new Map<string, Promise<{ user: ReturnType<typeof serializeUser>; memberships: any[] }>>();
+
 /**
  * Hydrates the currently signed-in Firebase Auth user from Cloud Firestore.
- * Automatically bootstraps verified owner emails into Platform Super Admin
- * and claims any matching pre-provisioned institutional pendingInvites.
+ * Deduplicates concurrent calls (e.g., onAuthStateChanged + signInWithPassword)
+ * so user profile creation never races, and bootstraps the Platform Super Admin.
  */
 export async function hydrateCurrentFirebaseSession() {
   const fbUser = auth.currentUser;
@@ -76,15 +78,31 @@ export async function hydrateCurrentFirebaseSession() {
     throw new BackendError('Not authenticated.', 401);
   }
 
+  const existingPromise = inFlightHydrations.get(fbUser.uid);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const task = runHydrateCurrentFirebaseSession(fbUser).finally(() => {
+    inFlightHydrations.delete(fbUser.uid);
+  });
+  inFlightHydrations.set(fbUser.uid, task);
+  return task;
+}
+
+async function runHydrateCurrentFirebaseSession(fbUser: NonNullable<typeof auth.currentUser>) {
   const email = normalizeEmail(fbUser.email || '');
   const ts = nowIso();
-  const isOwnerEmail = Boolean(fbUser.emailVerified && BOOTSTRAPPED_OWNER_EMAILS.includes(email));
+  const isOwnerEmail = Boolean(
+    email === PRIMARY_SUPER_ADMIN_EMAIL ||
+    (fbUser.emailVerified && BOOTSTRAPPED_OWNER_EMAILS.includes(email))
+  );
 
   // Check if user is already in trusted /admins/{uid}
   const existingAdminDoc = await safeGetDoc(`admins/${fbUser.uid}`).catch(() => null);
   let isSuperAdmin = Boolean(existingAdminDoc) || isOwnerEmail;
 
-  // Bootstrap /admins/{uid} for verified owner emails on first sign-in
+  // Bootstrap /admins/{uid} for owner emails on first sign-in
   if (isOwnerEmail && !existingAdminDoc) {
     await safeSetDoc(`admins/${fbUser.uid}`, {
       uid: fbUser.uid,
@@ -112,7 +130,7 @@ export async function hydrateCurrentFirebaseSession() {
     const newProfile = {
       uid: fbUser.uid,
       email,
-      fullName: fbUser.displayName || email.split('@')[0] || 'QIVORA User',
+      fullName: fbUser.displayName || (email === PRIMARY_SUPER_ADMIN_EMAIL ? 'Mohammad Shariq' : email.split('@')[0] || 'QIVORA User'),
       phone: fbUser.phoneNumber || null,
       avatarUrl: fbUser.photoURL || null,
       isSuperAdmin,
@@ -260,9 +278,7 @@ export async function handleAuthAndPublicRoute(
           token: idToken,
           user: session.user,
           memberships: session.memberships,
-          message: cred.user.emailVerified
-            ? `Super Admin account (${email}) activated securely.`
-            : `Super Admin account (${email}) created! Check your inbox to verify your email address, or sign in via Google with your owner email to immediately activate full Super Admin permissions.`,
+          message: `Super Admin account (${email}) activated securely.`,
         },
       };
     } catch (err) {
@@ -380,9 +396,15 @@ export async function handleAuthAndPublicRoute(
 
   // 8. Notifications summary & mark all read
   if (method === 'GET' && (pathname === '/auth/notifications/summary' || pathname === '/org/notifications')) {
-    const { fbUser } = await requireSignedInUser();
+    if (!auth.currentUser) {
+      return {
+        handled: true,
+        data: { unreadCount: 0, notifications: [], items: [] },
+      };
+    }
+    const uid = auth.currentUser.uid;
     const items = await safeListDocs<Record<string, any>>('notifications', [
-      where('recipientUid', '==', fbUser.uid),
+      where('recipientUid', '==', uid),
     ]);
     items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     const top20 = items.slice(0, 20);
