@@ -141,6 +141,13 @@ function HomeRedirect() {
   return <Navigate to="/org" replace />;
 }
 
+function PublicOnlyLogin() {
+  const { user, loading } = useAuth();
+  if (loading) return <FullPageLoader />;
+  if (user) return <Navigate to="/" replace />;
+  return <LoginPage />;
+}
+
 function RequirePlatformSuperAdmin({ children }: { children: React.ReactNode }) {
   const { user, activeWorkspace, loading } = useAuth();
   if (loading) return <FullPageLoader />;
@@ -188,7 +195,7 @@ export default function App() {
               <Suspense fallback={<FullPageLoader />}>
                 <Routes>
                   {/* Public Routes */}
-                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/login" element={<PublicOnlyLogin />} />
                   <Route path="/register" element={<PublicRegisterPage />} />
                   <Route path="/verify" element={<VerifyQrPage />} />
                   <Route path="/verify/:token" element={<VerifyQrPage />} />

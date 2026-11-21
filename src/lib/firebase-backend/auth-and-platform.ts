@@ -4,7 +4,6 @@ import {
   reauthenticateWithCredential,
   sendEmailVerification,
   sendPasswordResetEmail,
-  signInWithEmailAndPassword,
   updatePassword,
   updateProfile,
   verifyBeforeUpdateEmail,
@@ -217,73 +216,23 @@ export async function handleAuthAndPublicRoute(
   _searchParams: URLSearchParams,
   body: any
 ): Promise<{ handled: boolean; data?: any }> {
-  // 1. Setup status
+  // 1. Setup status — one-time setup is permanently completed
   if (method === 'GET' && pathname === '/auth/setup-status') {
-    const setupDoc = await safeGetDoc<{ value?: { initialized?: boolean; superAdminEmail?: string } }>(
-      'platformSettings/setup_status'
-    ).catch(() => null);
     return {
       handled: true,
       data: {
-        superAdminEmail: setupDoc?.value?.superAdminEmail || PRIMARY_SUPER_ADMIN_EMAIL,
-        needsSuperAdminSetup: !Boolean(setupDoc?.value?.initialized),
+        superAdminEmail: PRIMARY_SUPER_ADMIN_EMAIL,
+        needsSuperAdminSetup: false,
       },
     };
   }
 
-  // 2. One-time Super Admin Firebase Auth Email/Password setup
+  // 2. One-time Super Admin setup is permanently locked after initial setup
   if (method === 'POST' && pathname === '/auth/setup-super-admin') {
-    const email = normalizeEmail(String(body?.email || ''));
-    const password = String(body?.password || '');
-    if (email !== PRIMARY_SUPER_ADMIN_EMAIL) {
-      throw new BackendError(
-        `Initial Super Admin setup is restricted exclusively to ${PRIMARY_SUPER_ADMIN_EMAIL}.`,
-        403
-      );
-    }
-    const policyCheck = validatePasswordAgainstPolicy(password, DEFAULT_PASSWORD_POLICY);
-    if (!policyCheck.valid) {
-      throw new BackendError(policyCheck.error || 'Password does not meet security policy.', 400);
-    }
-
-    const setupDoc = await safeGetDoc<{ value?: { initialized?: boolean } }>(
-      'platformSettings/setup_status'
-    ).catch(() => null);
-    if (setupDoc?.value?.initialized) {
-      throw new BackendError(
-        'Super Admin account is already initialized. Please sign in with your email and password or Google.',
-        403
-      );
-    }
-
-    try {
-      let cred;
-      try {
-        cred = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(cred.user, { displayName: 'Mohammad Shariq' }).catch(() => {});
-        await sendEmailVerification(cred.user).catch(() => {});
-      } catch (createErr: any) {
-        if (createErr?.code === 'auth/email-already-in-use') {
-          cred = await signInWithEmailAndPassword(auth, email, password);
-        } else {
-          throw createErr;
-        }
-      }
-
-      const session = await hydrateCurrentFirebaseSession();
-      const idToken = await cred.user.getIdToken();
-      return {
-        handled: true,
-        data: {
-          token: idToken,
-          user: session.user,
-          memberships: session.memberships,
-          message: `Super Admin account (${email}) activated securely.`,
-        },
-      };
-    } catch (err) {
-      throw new BackendError(formatFirebaseAuthError(err), 400);
-    }
+    throw new BackendError(
+      'Initial Super Admin setup has already been completed and is locked. Please sign in with your email and password or Google.',
+      403
+    );
   }
 
   // 3. Current user hydration

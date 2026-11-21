@@ -1,19 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowRight, KeyRound, Moon, QrCode, ShieldCheck, Sun, UserPlus } from 'lucide-react';
+import { ArrowRight, KeyRound, Moon, QrCode, Sun, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { QivoraFooter, QivoraLogo } from '../../components/brand/QivoraLogo.tsx';
 import { Button, Field, Input, Modal } from '../../components/ui/primitives.tsx';
-import {
-  type AuthUser,
-  type OrganizationMembership,
-  useAuth,
-} from '../../contexts/AuthContext.tsx';
+import { useAuth } from '../../contexts/AuthContext.tsx';
 import { useTheme } from '../../contexts/ThemeContext.tsx';
 import { apiRequest } from '../../lib/api.ts';
 
 export function LoginPage() {
-  const { signInWithGoogle, signInWithPassword, applySessionUpdate } = useAuth();
+  const { signInWithGoogle, signInWithPassword } = useAuth();
   const { resolvedTheme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
@@ -28,62 +24,6 @@ export function LoginPage() {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetSentNotice, setResetSentNotice] = useState<string | null>(null);
 
-  const [setupStatus, setSetupStatus] = useState<{
-    superAdminEmail: string;
-    needsSuperAdminSetup: boolean;
-  } | null>(null);
-  const [setupModalOpen, setSetupModalOpen] = useState(false);
-  const [setupPassword, setSetupPassword] = useState('');
-  const [setupConfirmPassword, setSetupConfirmPassword] = useState('');
-  const [setupLoading, setSetupLoading] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    apiRequest<{ superAdminEmail: string; needsSuperAdminSetup: boolean }>('/auth/setup-status', {
-      skipAuth: true,
-    })
-      .then((res) => {
-        if (active) setSetupStatus(res);
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const handleCompleteSuperAdminSetup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!setupStatus) return;
-    if (setupPassword !== setupConfirmPassword) {
-      toast.error('Passwords do not match.');
-      return;
-    }
-    setSetupLoading(true);
-    try {
-      const res = await apiRequest<{
-        token: string;
-        user: AuthUser;
-        memberships: OrganizationMembership[];
-        message: string;
-      }>('/auth/setup-super-admin', {
-        method: 'POST',
-        body: {
-          email: setupStatus.superAdminEmail,
-          password: setupPassword,
-        },
-        skipAuth: true,
-      });
-      applySessionUpdate(res.token, res.user, res.memberships);
-      setSetupModalOpen(false);
-      setSetupStatus({ ...setupStatus, needsSuperAdminSetup: false });
-      toast.success(res.message);
-      navigate('/platform');
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Unable to complete Super Admin setup.');
-    } finally {
-      setSetupLoading(false);
-    }
-  };
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -206,28 +146,6 @@ export function LoginPage() {
             Access your Platform Super Admin, College Admin, Librarian, or Student workspace.
           </p>
 
-          {setupStatus?.needsSuperAdminSetup && (
-            <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50/90 p-3.5 text-xs text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-200 space-y-2">
-              <div className="flex items-center gap-2 font-semibold">
-                <ShieldCheck className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                <span>Initial Platform Super Admin Setup Required</span>
-              </div>
-              <p className="leading-relaxed opacity-90">
-                Complete one-time server-side password initialization for{' '}
-                <span className="font-mono font-semibold">{setupStatus.superAdminEmail}</span> to
-                activate Platform Super Admin login.
-              </p>
-              <Button
-                type="button"
-                size="sm"
-                variant="gold"
-                onClick={() => setSetupModalOpen(true)}
-              >
-                <KeyRound className="h-3.5 w-3.5" />
-                Initialize Super Admin Password
-              </Button>
-            </div>
-          )}
 
           {error && (
             <div className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
@@ -367,61 +285,6 @@ export function LoginPage() {
             <Button type="submit" loading={resetLoading}>
               <KeyRound className="h-4 w-4" />
               Send Reset Email
-            </Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* One-Time Super Admin Initial Password Setup Modal */}
-      <Modal
-        open={setupModalOpen}
-        onOpenChange={setSetupModalOpen}
-        title="Initialize Platform Super Admin"
-        description={`One-time secure Firebase Authentication setup for ${setupStatus?.superAdminEmail || 'mohammad@shariq.com'}. Credentials are managed exclusively by Firebase Auth and never stored in plaintext.`}
-        maxWidth="max-w-md"
-      >
-        <form onSubmit={handleCompleteSuperAdminSetup} className="space-y-4">
-          <Field label="Super Admin Login Email">
-            <Input
-              type="email"
-              readOnly
-              value={setupStatus?.superAdminEmail || 'mohammad@shariq.com'}
-              className="font-mono bg-slate-50 dark:bg-slate-900"
-            />
-          </Field>
-          <Field
-            label="Create Strong Password"
-            required
-            hint="Min 10 characters with uppercase, lowercase, number, and special character."
-          >
-            <Input
-              type="password"
-              required
-              minLength={10}
-              autoComplete="new-password"
-              value={setupPassword}
-              onChange={(e) => setSetupPassword(e.target.value)}
-              placeholder="Enter strong Super Admin password"
-            />
-          </Field>
-          <Field label="Confirm Password" required>
-            <Input
-              type="password"
-              required
-              minLength={10}
-              autoComplete="new-password"
-              value={setupConfirmPassword}
-              onChange={(e) => setSetupConfirmPassword(e.target.value)}
-              placeholder="Re-enter password"
-            />
-          </Field>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={() => setSetupModalOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="gold" loading={setupLoading}>
-              <ShieldCheck className="h-4 w-4" />
-              Activate Super Admin
             </Button>
           </div>
         </form>

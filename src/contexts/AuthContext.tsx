@@ -1,8 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
+  browserLocalPersistence,
+  getRedirectResult,
   onAuthStateChanged,
+  setPersistence,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import { setApiOrganizationId } from '../lib/api.ts';
@@ -105,6 +109,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
+    // Ensure session persists across page refreshes on Netlify & Vercel
+    void setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+    // Complete Google Sign-In if returning from a redirect fallback (e.g., mobile/popup-blocked browsers)
+    void getRedirectResult(auth).catch((err) => {
+      console.warn('Google Sign-In redirect check:', formatFirebaseAuthError(err));
+    });
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (!mounted) return;
       if (fbUser) {
@@ -140,6 +152,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await signInWithPopup(auth, googleAuthProvider);
       await hydrateFromFirestore();
     } catch (err: unknown) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        await signInWithRedirect(auth, googleAuthProvider);
+        return;
+      }
       throw new Error(formatFirebaseAuthError(err));
     }
   };
