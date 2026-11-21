@@ -1,8 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { apiRequest, setApiOrganizationId, setApiToken, setApiTokenProvider } from '../lib/api.ts';
-import { auth, googleAuthProvider } from '../lib/firebase.ts';
-import { isSupabaseConfigured, supabase } from '../lib/supabase.ts';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
+import { setApiOrganizationId } from '../lib/api.ts';
+import { auth, formatFirebaseAuthError, googleAuthProvider } from '../lib/firebase.ts';
+import { hydrateCurrentFirebaseSession } from '../lib/firebase-backend/auth-and-platform.ts';
 
 export interface AuthUser {
   id: string;
@@ -37,10 +42,8 @@ interface AuthContextValue {
   memberships: OrganizationMembership[];
   activeWorkspace: ActiveWorkspace | null;
   loading: boolean;
-  supabaseConfigured: boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithPassword: (email: string, password: string) => Promise<void>;
-  signInWithSupabasePassword: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
   selectWorkspace: (ws: ActiveWorkspace) => void;
@@ -54,40 +57,11 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-const SESSION_KEY = 'qivora-session-token';
-const LEGACY_SESSION_KEY = 'sharixa-session-token';
-
-function readStoredSession(): string | null {
-  try {
-    const current = sessionStorage.getItem(SESSION_KEY);
-    if (current) return current;
-    const legacy = sessionStorage.getItem(LEGACY_SESSION_KEY);
-    if (legacy) {
-      sessionStorage.setItem(SESSION_KEY, legacy);
-      sessionStorage.removeItem(LEGACY_SESSION_KEY);
-      return legacy;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function clearStoredSession() {
-  try {
-    sessionStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(LEGACY_SESSION_KEY);
-  } catch {
-    // ignore
-  }
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [memberships, setMemberships] = useState<OrganizationMembership[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<ActiveWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
-  const supabaseConfigured = isSupabaseConfigured();
 
   const pickDefaultWorkspace = useCallback(
     (u: AuthUser, mems: OrganizationMembership[], current: ActiveWorkspace | null): ActiveWorkspace | null => {
@@ -117,27 +91,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const hydrateFromServer = useCallback(async () => {
-    try {
-      const data = await apiRequest<{
-        user: AuthUser;
-        memberships: OrganizationMembership[];
-      }>('/auth/me');
-      setUser(data.user);
-      setMemberships(data.memberships);
-      setActiveWorkspace((prev) => {
-        const next = pickDefaultWorkspace(data.user, data.memberships, prev);
-        setApiOrganizationId(next?.type === 'organization' ? next.membership.organizationId : null);
-        return next;
-      });
-    } catch {
-      setUser(null);
-      setMemberships([]);
-      applyWorkspace(null);
-      setApiToken(null);
-      clearStoredSession();
-    }
-  }, [applyWorkspace, pickDefaultWorkspace]);
+  const hydrateFromFirestore = useCallback(async () => {
+    const data = await hydrateCurrentFirebaseSession();
+    setUser(data.user);
+    setMemberships(data.memberships);
+    setActiveWorkspace((prev) => {
+      const next = pickDefaultWorkspace(data.user, data.memberships, prev);
+      setApiOrganizationId(next?.type === 'organization' ? next.membership.organizationId : null);
+      return next;
+    });
+  }, [pickDefaultWorkspace]);
 
   useEffect(() => {
     let mounted = true;
@@ -145,137 +108,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (!mounted) return;
       if (fbUser) {
-        setApiTokenProvider(async () => {
-          const current = auth.currentUser;
-          return current ? current.getIdToken() : null;
-        });
-        const idToken = await fbUser.getIdToken();
-        setApiToken(idToken);
-        await hydrateFromServer();
-        if (mounted) setLoading(false);
+        try {
+          await hydrateFromFirestore();
+        } catch (err) {
+          console.error('Failed to hydrate QIVORA Firestore profile:', err);
+          if (mounted) {
+            setUser(null);
+            setMemberships([]);
+            applyWorkspace(null);
+          }
+        } finally {
+          if (mounted) setLoading(false);
+        }
         return;
       }
 
-      // Check active Supabase Auth session if configured
-      if (supabase) {
-        try {
-          const { data: sbSessionData } = await supabase.auth.getSession();
-          const sbAccessToken = sbSessionData.session?.access_token;
-          if (sbAccessToken) {
-            setApiTokenProvider(async () => {
-              const latest = await supabase?.auth.getSession();
-              return latest?.data.session?.access_token ?? null;
-            });
-            setApiToken(sbAccessToken);
-            await hydrateFromServer();
-            if (mounted) setLoading(false);
-            return;
-          }
-        } catch {
-          // Fall through to institutional session check
-        }
-      }
-
-      // Check institutional session token in sessionStorage (tab-scoped, not localStorage)
-      const storedSession = readStoredSession();
-
-      if (storedSession) {
-        setApiTokenProvider(null);
-        setApiToken(storedSession);
-        await hydrateFromServer();
-      } else {
-        setUser(null);
-        setMemberships([]);
-        applyWorkspace(null);
-      }
+      setUser(null);
+      setMemberships([]);
+      applyWorkspace(null);
       if (mounted) setLoading(false);
     });
-
-    const sbSubscription = supabase
-      ? supabase.auth.onAuthStateChange(async (event, session) => {
-          if (!mounted) return;
-          if (event === 'SIGNED_IN' && session?.access_token) {
-            setApiTokenProvider(async () => {
-              const latest = await supabase?.auth.getSession();
-              return latest?.data.session?.access_token ?? null;
-            });
-            setApiToken(session.access_token);
-            await hydrateFromServer();
-          } else if (event === 'SIGNED_OUT') {
-            if (!auth.currentUser && !readStoredSession()) {
-              setApiTokenProvider(null);
-              setApiToken(null);
-              setUser(null);
-              setMemberships([]);
-              applyWorkspace(null);
-            }
-          }
-        })
-      : null;
 
     return () => {
       mounted = false;
       unsubscribe();
-      sbSubscription?.data.subscription.unsubscribe();
     };
-  }, [applyWorkspace, hydrateFromServer]);
+  }, [applyWorkspace, hydrateFromFirestore]);
 
   const signInWithGoogle = async () => {
-    const cred = await signInWithPopup(auth, googleAuthProvider);
-    const idToken = await cred.user.getIdToken();
-    setApiTokenProvider(async () => (auth.currentUser ? auth.currentUser.getIdToken() : null));
-    setApiToken(idToken);
-    clearStoredSession();
-    await hydrateFromServer();
-  };
-
-  const signInWithSupabasePassword = async (email: string, password: string) => {
-    if (!supabase) {
-      throw new Error(
-        'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to use Supabase Auth.'
-      );
+    try {
+      await signInWithPopup(auth, googleAuthProvider);
+      await hydrateFromFirestore();
+    } catch (err: unknown) {
+      throw new Error(formatFirebaseAuthError(err));
     }
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error || !data.session?.access_token) {
-      throw new Error(error?.message || 'Supabase authentication failed.');
-    }
-    setApiTokenProvider(async () => {
-      const latest = await supabase?.auth.getSession();
-      return latest?.data.session?.access_token ?? null;
-    });
-    setApiToken(data.session.access_token);
-    clearStoredSession();
-    await hydrateFromServer();
   };
 
   const signInWithPassword = async (email: string, password: string) => {
-    const res = await apiRequest<{
-      token: string;
-      user: AuthUser;
-      memberships: OrganizationMembership[];
-    }>('/auth/login', {
-      method: 'POST',
-      body: { email, password },
-      skipAuth: true,
-    });
-
-    if (auth.currentUser) {
-      await signOut(auth);
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      throw new Error('Please enter both your email address and password.');
     }
-    if (supabase) {
-      await supabase.auth.signOut().catch(() => {});
-    }
-    setApiTokenProvider(null);
-    setApiToken(res.token);
     try {
-      sessionStorage.setItem(SESSION_KEY, res.token);
-    } catch {
-      // ignore
+      await signInWithEmailAndPassword(auth, normalizedEmail, password);
+      await hydrateFromFirestore();
+    } catch (err: unknown) {
+      throw new Error(formatFirebaseAuthError(err));
     }
-    setUser(res.user);
-    setMemberships(res.memberships);
-    const next = pickDefaultWorkspace(res.user, res.memberships, null);
-    applyWorkspace(next);
   };
 
   const logout = async () => {
@@ -284,18 +163,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await signOut(auth);
       }
     } catch {
-      // ignore
+      // ignore signOut errors
     }
-    try {
-      if (supabase) {
-        await supabase.auth.signOut();
-      }
-    } catch {
-      // ignore
-    }
-    clearStoredSession();
-    setApiTokenProvider(null);
-    setApiToken(null);
     setApiOrganizationId(null);
     setUser(null);
     setMemberships([]);
@@ -303,7 +172,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const selectWorkspace = (ws: ActiveWorkspace) => {
-    // Only allow switching to server-verified workspaces
     if (ws.type === 'platform' && !user?.isSuperAdmin) return;
     if (ws.type === 'organization') {
       const authorized = memberships.some(
@@ -321,14 +189,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const applySessionUpdate = useCallback(
-    (token: string, updatedUser: AuthUser, nextMemberships?: OrganizationMembership[]) => {
-      setApiTokenProvider(null);
-      setApiToken(token);
-      try {
-        sessionStorage.setItem(SESSION_KEY, token);
-      } catch {
-        // ignore
-      }
+    (_token: string, updatedUser: AuthUser, nextMemberships?: OrganizationMembership[]) => {
       setUser(updatedUser);
       if (nextMemberships) {
         setMemberships(nextMemberships);
@@ -339,6 +200,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [applyWorkspace, pickDefaultWorkspace]
   );
 
+  const refreshSession = useCallback(async () => {
+    if (!auth.currentUser) return;
+    await hydrateFromFirestore();
+  }, [hydrateFromFirestore]);
+
   return (
     <AuthContext.Provider
       value={{
@@ -346,12 +212,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         memberships,
         activeWorkspace,
         loading,
-        supabaseConfigured,
         signInWithGoogle,
         signInWithPassword,
-        signInWithSupabasePassword,
         logout,
-        refreshSession: hydrateFromServer,
+        refreshSession,
         selectWorkspace,
         updateUser,
         applySessionUpdate,

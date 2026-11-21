@@ -1,19 +1,32 @@
 /**
- * QIVORA — Centralized Frontend Environment Configuration & Validation
+ * QIVORA — Centralized Frontend Environment Configuration & Firebase Diagnostics
  *
  * SECURITY RULES:
- * - Never place SUPABASE_SERVICE_ROLE_KEY or any secret in VITE_* variables.
- * - Supports both legacy VITE_SUPABASE_ANON_KEY and newer VITE_SUPABASE_PUBLISHABLE_KEY.
- * - Never invents credentials or silently falls back to mock data.
+ * - Only public Firebase web SDK configuration keys belong in VITE_FIREBASE_* variables.
+ * - Never place service account keys or admin secrets in frontend environment variables.
+ * - Falls back seamlessly to firebase-applet-config.json when VITE_FIREBASE_* overrides are not set.
  */
 
-export interface SupabaseClientEnv {
-  url: string | null;
-  publicKey: string | null;
-  keyType: 'publishable' | 'anon' | null;
+import appletConfig from '../../firebase-applet-config.json';
+
+export interface FirebaseClientConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  storageBucket: string;
+  messagingSenderId: string;
+  appId: string;
+  firestoreDatabaseId?: string;
+  measurementId?: string;
+}
+
+export interface FirebaseConfigDiagnostics {
+  projectId: string;
+  authDomain: string;
+  firestoreDatabaseId: string;
+  source: 'env' | 'firebase-applet-config';
+  currentHost: string;
   isConfigured: boolean;
-  missingVars: string[];
-  validationError: string | null;
 }
 
 function readViteEnv(key: string): string | null {
@@ -31,38 +44,40 @@ function readViteEnv(key: string): string | null {
   }
 }
 
-export function getSupabaseClientEnv(): SupabaseClientEnv {
-  const url = readViteEnv('VITE_SUPABASE_URL');
-  const publishableKey = readViteEnv('VITE_SUPABASE_PUBLISHABLE_KEY');
-  const anonKey = readViteEnv('VITE_SUPABASE_ANON_KEY');
-  const publicKey = publishableKey || anonKey;
-  const keyType = publishableKey ? 'publishable' : anonKey ? 'anon' : null;
-
-  const missingVars: string[] = [];
-  if (!url) missingVars.push('VITE_SUPABASE_URL');
-  if (!publicKey) missingVars.push('VITE_SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_KEY)');
-
-  let validationError: string | null = null;
-  if (url) {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-        validationError = 'VITE_SUPABASE_URL must use HTTPS in production.';
-      }
-    } catch {
-      validationError = 'VITE_SUPABASE_URL is not a valid URL.';
-    }
-  } else if (missingVars.length > 0) {
-    validationError = `Supabase environment variables not configured: ${missingVars.join(', ')}.`;
-  }
+export function getFirebaseClientConfig(): FirebaseClientConfig {
+  const envApiKey = readViteEnv('VITE_FIREBASE_API_KEY');
+  const envProjectId = readViteEnv('VITE_FIREBASE_PROJECT_ID');
+  const envAuthDomain = readViteEnv('VITE_FIREBASE_AUTH_DOMAIN');
+  const envStorageBucket = readViteEnv('VITE_FIREBASE_STORAGE_BUCKET');
+  const envMessagingSenderId = readViteEnv('VITE_FIREBASE_MESSAGING_SENDER_ID');
+  const envAppId = readViteEnv('VITE_FIREBASE_APP_ID');
+  const envDatabaseId = readViteEnv('VITE_FIREBASE_FIRESTORE_DATABASE_ID');
+  const envMeasurementId = readViteEnv('VITE_FIREBASE_MEASUREMENT_ID');
 
   return {
-    url,
-    publicKey,
-    keyType,
-    isConfigured: Boolean(url && publicKey && !validationError),
-    missingVars,
-    validationError,
+    apiKey: envApiKey || appletConfig.apiKey,
+    authDomain: envAuthDomain || appletConfig.authDomain,
+    projectId: envProjectId || appletConfig.projectId,
+    storageBucket: envStorageBucket || appletConfig.storageBucket,
+    messagingSenderId: envMessagingSenderId || appletConfig.messagingSenderId,
+    appId: envAppId || appletConfig.appId,
+    firestoreDatabaseId: envDatabaseId || appletConfig.firestoreDatabaseId || '(default)',
+    measurementId: envMeasurementId || appletConfig.measurementId || undefined,
+  };
+}
+
+export function getFirebaseConfigDiagnostics(): FirebaseConfigDiagnostics {
+  const cfg = getFirebaseClientConfig();
+  const hasEnvOverride = Boolean(readViteEnv('VITE_FIREBASE_API_KEY') && readViteEnv('VITE_FIREBASE_PROJECT_ID'));
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'server';
+
+  return {
+    projectId: cfg.projectId,
+    authDomain: cfg.authDomain,
+    firestoreDatabaseId: cfg.firestoreDatabaseId || '(default)',
+    source: hasEnvOverride ? 'env' : 'firebase-applet-config',
+    currentHost,
+    isConfigured: Boolean(cfg.apiKey && cfg.projectId && cfg.appId && cfg.projectId !== 'remixed-project-id'),
   };
 }
 

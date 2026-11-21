@@ -13,13 +13,7 @@ import { useTheme } from '../../contexts/ThemeContext.tsx';
 import { apiRequest } from '../../lib/api.ts';
 
 export function LoginPage() {
-  const {
-    signInWithGoogle,
-    signInWithPassword,
-    signInWithSupabasePassword,
-    supabaseConfigured,
-    applySessionUpdate,
-  } = useAuth();
+  const { signInWithGoogle, signInWithPassword, applySessionUpdate } = useAuth();
   const { resolvedTheme, toggleTheme } = useTheme();
   const navigate = useNavigate();
 
@@ -27,16 +21,12 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [supabaseLoading, setSupabaseLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [resetModalOpen, setResetModalOpen] = useState(false);
-  const [resetStep, setResetStep] = useState<'request' | 'confirm'>('request');
   const [resetEmail, setResetEmail] = useState('');
-  const [resetToken, setResetToken] = useState('');
-  const [newPassword, setNewPassword] = useState('');
   const [resetLoading, setResetLoading] = useState(false);
-  const [generatedTokenNotice, setGeneratedTokenNotice] = useState<string | null>(null);
+  const [resetSentNotice, setResetSentNotice] = useState<string | null>(null);
 
   const [setupStatus, setSetupStatus] = useState<{
     superAdminEmail: string;
@@ -124,67 +114,20 @@ export function LoginPage() {
     }
   };
 
-  const handleSupabaseSignIn = async () => {
-    if (!email.trim() || !password) {
-      setError('Enter your email and password above to sign in via Supabase Auth.');
-      return;
-    }
-    setError(null);
-    setSupabaseLoading(true);
-    try {
-      await signInWithSupabasePassword(email, password);
-      toast.success('Authenticated via Supabase Auth');
-      navigate('/');
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Supabase sign-in failed.');
-    } finally {
-      setSupabaseLoading(false);
-    }
-  };
-
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetLoading(true);
-    setGeneratedTokenNotice(null);
+    setResetSentNotice(null);
     try {
-      const res = await apiRequest<{
-        message: string;
-        resetToken?: string;
-        smtpConfigured?: boolean;
-      }>('/auth/forgot-password', {
+      const res = await apiRequest<{ message: string }>('/auth/forgot-password', {
         method: 'POST',
         body: { email: resetEmail },
         skipAuth: true,
       });
       toast.success(res.message);
-      if (res.resetToken) {
-        setResetToken(res.resetToken);
-        setGeneratedTokenNotice(res.message);
-      }
-      setResetStep('confirm');
+      setResetSentNotice(res.message);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to request password reset.');
-    } finally {
-      setResetLoading(false);
-    }
-  };
-
-  const handleResetConfirm = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setResetLoading(true);
-    try {
-      const res = await apiRequest<{ message: string }>('/auth/reset-password', {
-        method: 'POST',
-        body: { token: resetToken, newPassword },
-        skipAuth: true,
-      });
-      toast.success(res.message);
-      setResetModalOpen(false);
-      setResetStep('request');
-      setResetToken('');
-      setNewPassword('');
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Password reset failed.');
+      toast.error(err instanceof Error ? err.message : 'Failed to send password reset email.');
     } finally {
       setResetLoading(false);
     }
@@ -232,7 +175,7 @@ export function LoginPage() {
 
         <div className="relative z-10 flex items-center justify-between text-xs text-slate-400">
           <span>QIVORA — Smart Library Management System</span>
-          <span>PostgreSQL · Role-Based Access Control</span>
+          <span>Firebase Auth · Cloud Firestore RBAC</span>
         </div>
       </div>
 
@@ -358,7 +301,7 @@ export function LoginPage() {
                 type="button"
                 onClick={() => {
                   setResetEmail(email);
-                  setResetStep('request');
+                  setResetSentNotice(null);
                   setResetModalOpen(true);
                 }}
                 className="text-xs font-medium text-[#4F46E5] hover:underline dark:text-indigo-400 cursor-pointer"
@@ -371,19 +314,6 @@ export function LoginPage() {
               Sign In
               <ArrowRight className="h-4 w-4" />
             </Button>
-
-            {supabaseConfigured && (
-              <Button
-                type="button"
-                variant="outline"
-                size="md"
-                className="w-full"
-                loading={supabaseLoading}
-                onClick={handleSupabaseSignIn}
-              >
-                Sign In via Supabase Auth
-              </Button>
-            )}
           </form>
 
           <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-slate-200 dark:border-slate-800 pt-6">
@@ -407,82 +337,47 @@ export function LoginPage() {
         <QivoraFooter className="pt-4" />
       </div>
 
-      {/* Password Reset Modal */}
+      {/* Password Reset Modal (Firebase Authentication) */}
       <Modal
         open={resetModalOpen}
         onOpenChange={setResetModalOpen}
         title="Reset Account Password"
-        description={
-          resetStep === 'request'
-            ? 'Enter your registered institutional email to generate a secure reset token.'
-            : 'Provide your reset token and choose a new password (minimum 8 characters).'
-        }
+        description="Enter your registered institutional email to receive a secure Firebase password reset link."
         maxWidth="max-w-md"
       >
-        {resetStep === 'request' ? (
-          <form onSubmit={handleForgotPassword} className="space-y-4">
-            <Field label="Email Address" required>
-              <Input
-                type="email"
-                required
-                value={resetEmail}
-                onChange={(e) => setResetEmail(e.target.value)}
-                placeholder="name@college.edu"
-              />
-            </Field>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setResetModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={resetLoading}>
-                <KeyRound className="h-4 w-4" />
-                Request Reset
-              </Button>
+        <form onSubmit={handleForgotPassword} className="space-y-4">
+          {resetSentNotice && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
+              {resetSentNotice}
             </div>
-          </form>
-        ) : (
-          <form onSubmit={handleResetConfirm} className="space-y-4">
-            {generatedTokenNotice && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
-                {generatedTokenNotice}
-              </div>
-            )}
-            <Field label="Reset Token" required>
-              <Input
-                required
-                value={resetToken}
-                onChange={(e) => setResetToken(e.target.value)}
-                placeholder="Paste reset token"
-              />
-            </Field>
-            <Field label="New Password" required hint="Minimum 8 characters.">
-              <Input
-                type="password"
-                required
-                minLength={8}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Enter new password"
-              />
-            </Field>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setResetStep('request')}>
-                Back
-              </Button>
-              <Button type="submit" loading={resetLoading}>
-                Update Password
-              </Button>
-            </div>
-          </form>
-        )}
+          )}
+          <Field label="Email Address" required>
+            <Input
+              type="email"
+              required
+              value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              placeholder="name@college.edu"
+            />
+          </Field>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => setResetModalOpen(false)}>
+              Close
+            </Button>
+            <Button type="submit" loading={resetLoading}>
+              <KeyRound className="h-4 w-4" />
+              Send Reset Email
+            </Button>
+          </div>
+        </form>
       </Modal>
 
-      {/* One-Time Server-Side Super Admin Initial Password Setup Modal */}
+      {/* One-Time Super Admin Initial Password Setup Modal */}
       <Modal
         open={setupModalOpen}
         onOpenChange={setSetupModalOpen}
         title="Initialize Platform Super Admin"
-        description={`One-time secure password setup for ${setupStatus?.superAdminEmail || 'mohammad@shariq.com'}. Passwords are hashed server-side with scrypt and never stored in plaintext.`}
+        description={`One-time secure Firebase Authentication setup for ${setupStatus?.superAdminEmail || 'mohammad@shariq.com'}. Credentials are managed exclusively by Firebase Auth and never stored in plaintext.`}
         maxWidth="max-w-md"
       >
         <form onSubmit={handleCompleteSuperAdminSetup} className="space-y-4">

@@ -3,6 +3,7 @@
   "appId": "1:856070580863:web:be9938f40ecf8bba636d4a",
   "apiKey": "AIzaSyBx8mSNLVq_GRSm__CU8jDtIoyNBzQX5Z4",
   "authDomain": "poetic-transport-sbvhw.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-smartlibrary-d1beb0f3-d031-4ab4-8b16-f28ff91b471e",
   "storageBucket": "poetic-transport-sbvhw.firebasestorage.app",
   "messagingSenderId": "856070580863",
   "measurementId": "",

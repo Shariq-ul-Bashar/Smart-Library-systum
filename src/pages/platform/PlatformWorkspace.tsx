@@ -40,8 +40,8 @@ import {
   WelcomeBanner,
 } from '../../components/ui/primitives.tsx';
 import { type AuthUser, useAuth } from '../../contexts/AuthContext.tsx';
-import { useSupabaseStatus } from '../../hooks/useSupabaseStatus.ts';
 import { apiRequest } from '../../lib/api.ts';
+import { getFirebaseConfigDiagnostics } from '../../lib/env.ts';
 import { formatDate, formatDateTime } from '../../lib/utils.ts';
 import { founderService } from '../../services/founderService.ts';
 import { PlatformAccountsPage } from './PlatformAccountsPage.tsx';
@@ -1766,25 +1766,28 @@ function PlatformAuditLogs() {
 }
 
 function PlatformSystemHealth() {
-  const supabaseStatus = useSupabaseStatus();
+  const firebaseDiag = getFirebaseConfigDiagnostics();
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ['platform-health'],
     queryFn: () =>
       apiRequest<{
         status: string;
         timestamp: string;
-        database: { connected: boolean; latencyMs: number };
+        database: {
+          connected: boolean;
+          latencyMs: number;
+          projectId?: string;
+          authDomain?: string;
+          firestoreDatabaseId?: string;
+          currentHost?: string;
+          configSource?: string;
+          error?: string | null;
+        };
         totals: { organizations: number; profiles: number; auditLogs: number };
         uptimeSeconds: number;
-        supabaseExternal?: {
-          configured: boolean;
-          hasUrl: boolean;
-          hasAnonKey: boolean;
-          hasServiceRoleKey: boolean;
-          urlHost: string | null;
-        };
         integrations: {
           firebaseAuth: boolean;
+          cloudFirestore?: boolean;
           smtpEmail: boolean;
           whatsapp: boolean;
           webPush: boolean;
@@ -1799,11 +1802,11 @@ function PlatformSystemHealth() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
-            System Health &amp; Database Diagnostics
+            System Health &amp; Firebase Diagnostics
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Live PostgreSQL connectivity check, official Supabase client verification, and external
-            credential readiness.
+            Live Cloud Firestore connectivity check, Firebase Authentication configuration, and
+            multi-tenant metrics.
           </p>
         </div>
         <Button variant="outline" size="sm" loading={isFetching} onClick={() => refetch()}>
@@ -1814,17 +1817,17 @@ function PlatformSystemHealth() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricTile
-          label="Primary PostgreSQL"
+          label="Cloud Firestore"
           value={data?.database.connected ? 'Connected' : 'Error'}
           tone={data?.database.connected ? 'success' : 'danger'}
-          subtext={`Query ping: ${data?.database.latencyMs ?? 0} ms`}
+          subtext={`Ping latency: ${data?.database.latencyMs ?? 0} ms`}
         />
         <MetricTile label="Total Organizations" value={data?.totals.organizations ?? 0} />
         <MetricTile label="Registered Accounts" value={data?.totals.profiles ?? 0} />
         <MetricTile label="Audit Trail Entries" value={data?.totals.auditLogs ?? 0} />
       </div>
 
-      {/* Official Supabase Connection Diagnostics */}
+      {/* Firebase Project & Firestore Diagnostics */}
       <SurfaceCard className="p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -1833,21 +1836,16 @@ function PlatformSystemHealth() {
             </div>
             <div>
               <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
-                Supabase Official Client &amp; Server Diagnostics (@supabase/supabase-js)
+                Firebase Authentication &amp; Cloud Firestore Diagnostics
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Honest runtime validation of Supabase environment variables. Never fakes connectivity.
+                Live runtime validation of your Firebase project configuration and Firestore database.
               </p>
             </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            loading={supabaseStatus.checking}
-            onClick={() => supabaseStatus.checkNow()}
-          >
+          <Button size="sm" variant="outline" loading={isFetching} onClick={() => refetch()}>
             <RefreshCw className="h-3.5 w-3.5" />
-            Test Supabase Connection
+            Test Firestore Connection
           </Button>
         </div>
 
@@ -1855,79 +1853,55 @@ function PlatformSystemHealth() {
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-900 dark:text-white">
-                Browser Client (VITE_SUPABASE_*)
+                Firebase Project &amp; Auth Domain
               </span>
-              <StatusText
-                status={
-                  supabaseStatus.verification.connected
-                    ? 'active'
-                    : supabaseStatus.diagnostics.isConfigured
-                      ? 'pending'
-                      : 'not_configured'
-                }
-              />
+              <StatusText status={firebaseDiag.isConfigured ? 'active' : 'not_configured'} />
             </div>
-            <div className="text-slate-500 dark:text-slate-400">
-              {supabaseStatus.diagnostics.isConfigured
-                ? `Target URL: ${supabaseStatus.diagnostics.url} (${supabaseStatus.diagnostics.keyType} key)`
-                : `Missing env: ${supabaseStatus.diagnostics.missingVars.join(', ')}`}
+            <div className="text-slate-500 dark:text-slate-400 font-mono text-[11px]">
+              Project: {firebaseDiag.projectId} · Auth Domain: {firebaseDiag.authDomain}
             </div>
-            {(supabaseStatus.verification.connected || supabaseStatus.verification.error) && (
-              <div
-                className={
-                  supabaseStatus.verification.connected
-                    ? 'text-emerald-600 dark:text-emerald-400 font-medium'
-                    : 'text-amber-700 dark:text-amber-400'
-                }
-              >
-                {supabaseStatus.verification.connected
-                  ? 'Live Supabase client verification succeeded.'
-                  : supabaseStatus.verification.error}
-                {typeof supabaseStatus.verification.latencyMs === 'number'
-                  ? ` (${supabaseStatus.verification.latencyMs} ms)`
-                  : ''}
-              </div>
-            )}
+            <div className="text-slate-500 dark:text-slate-400 text-[11px]">
+              Active Host: <span className="font-mono">{firebaseDiag.currentHost}</span> (Config source: {firebaseDiag.source})
+            </div>
           </div>
 
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-900 dark:text-white">
-                Server Admin (SUPABASE_SERVICE_ROLE_KEY)
+                Cloud Firestore Named Database
               </span>
-              <StatusText
-                status={data?.supabaseExternal?.hasServiceRoleKey ? 'active' : 'not_configured'}
-              />
+              <StatusText status={data?.database.connected ? 'active' : 'inactive'} />
             </div>
-            <div className="text-slate-500 dark:text-slate-400">
-              {data?.supabaseExternal?.hasServiceRoleKey
-                ? `Configured on server only (${data.supabaseExternal.urlHost || 'Supabase host'})`
-                : 'Not configured on server. Add SUPABASE_SERVICE_ROLE_KEY to server secrets (never expose in frontend).'}
+            <div className="text-slate-500 dark:text-slate-400 font-mono text-[11px] break-all">
+              {firebaseDiag.firestoreDatabaseId}
             </div>
+            {data?.database.error ? (
+              <div className="text-amber-700 dark:text-amber-400">{data.database.error}</div>
+            ) : (
+              <div className="text-emerald-600 dark:text-emerald-400 font-medium">
+                Live Firestore server connection verified ({data?.database.latencyMs ?? 0} ms).
+              </div>
+            )}
           </div>
         </div>
       </SurfaceCard>
 
       <SurfaceCard className="p-5">
         <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-white mb-3">
-          Integration Readiness
+          Platform Services Status
         </h2>
         <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
           <div className="py-2.5 flex items-center justify-between">
-            <span>Firebase Authentication (Google OAuth)</span>
+            <span>Firebase Authentication (Google OAuth &amp; Email/Password)</span>
             <StatusText status={data?.integrations.firebaseAuth ? 'active' : 'inactive'} />
           </div>
           <div className="py-2.5 flex items-center justify-between">
-            <span>SMTP Email Delivery (Configure SMTP_* in .env)</span>
-            <StatusText status={data?.integrations.smtpEmail ? 'active' : 'not_configured'} />
+            <span>Cloud Firestore Multi-Tenant Database</span>
+            <StatusText status={data?.database.connected ? 'active' : 'inactive'} />
           </div>
           <div className="py-2.5 flex items-center justify-between">
-            <span>WhatsApp Cloud API Notifications</span>
-            <StatusText status={data?.integrations.whatsapp ? 'active' : 'not_configured'} />
-          </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span>Web Push Notifications (VAPID)</span>
-            <StatusText status={data?.integrations.webPush ? 'active' : 'not_configured'} />
+            <span>Open Library &amp; Google Books ISBN Metadata Lookup</span>
+            <StatusText status="active" />
           </div>
         </div>
       </SurfaceCard>

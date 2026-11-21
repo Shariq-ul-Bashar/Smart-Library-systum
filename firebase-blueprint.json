@@ -1,0 +1,330 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted Platform Super Admin registry entry keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile storing identity and password policy state; PII strictly restricted to owner or Super Admin.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "avatarUrl": { "type": "string", "maxLength": 500000 },
+        "isSuperAdmin": { "type": "boolean" },
+        "mustChangePassword": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "passwordChangedAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "isSuperAdmin", "status", "createdAt", "updatedAt"]
+    },
+    "Membership": {
+      "title": "Membership",
+      "description": "Deterministic multi-tenant role binding linking a Firebase Auth UID to an organization and role.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "maxLength": 200 },
+        "organizationCode": { "type": "string", "maxLength": 64 },
+        "organizationStatus": { "type": "string", "enum": ["active", "suspended", "pending"] },
+        "roleSlug": { "type": "string", "enum": ["college_admin", "librarian", "student"] },
+        "roleName": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "organizationId", "roleSlug", "status", "createdAt", "updatedAt"]
+    },
+    "PendingInvite": {
+      "title": "PendingInvite",
+      "description": "Pre-provisioned institutional role assignment claimed automatically when the invited user signs in.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "maxLength": 200 },
+        "organizationCode": { "type": "string", "maxLength": 64 },
+        "roleSlug": { "type": "string", "enum": ["college_admin", "librarian", "student"] },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "claimedByUid": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "claimed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "organizationId", "roleSlug", "status", "createdAt", "updatedAt"]
+    },
+    "PlatformSetting": {
+      "title": "PlatformSetting",
+      "description": "Global platform configuration documents (identity, password policy, integrations, setup status).",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "maxLength": 80, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "value": { "type": "object" },
+        "description": { "type": "string", "maxLength": 400 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["key", "value", "updatedAt"]
+    },
+    "PublicOrganization": {
+      "title": "PublicOrganization",
+      "description": "Strictly non-PII public college directory used by the student registration portal.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 200 },
+        "code": { "type": "string", "maxLength": 64 },
+        "universityName": { "type": "string", "maxLength": 200 },
+        "logoUrl": { "type": "string", "maxLength": 500000 },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "code", "status", "updatedAt"]
+    },
+    "PublicQrRecord": {
+      "title": "PublicQrRecord",
+      "description": "Public QR credential verification document storing only approved non-PII verification fields.",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "entityType": { "type": "string", "enum": ["student_id", "founder_id"] },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "isActive": { "type": "boolean" },
+        "status": { "type": "string", "maxLength": 40 },
+        "credential": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["token", "entityType", "entityId", "isActive", "status", "credential", "updatedAt"]
+    },
+    "FounderIdentity": {
+      "title": "FounderIdentity",
+      "description": "Exclusive Golden Premium Founder Digital ID managed solely by Platform Super Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "founderNumber": { "type": "string", "maxLength": 64 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "designation": { "type": "string", "maxLength": 120 },
+        "editionName": { "type": "string", "maxLength": 120 },
+        "organizationLabel": { "type": "string", "maxLength": 120 },
+        "linkedStudentId": { "type": "string", "maxLength": 128 },
+        "linkedOrganizationId": { "type": "string", "maxLength": 128 },
+        "linkedUserId": { "type": "string", "maxLength": 128 },
+        "qrToken": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["active", "revoked"] },
+        "collegeLinkStatus": { "type": "string", "enum": ["none", "approved", "revoked"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "founderNumber", "fullName", "designation", "status", "createdAt", "updatedAt"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Tenant college/university root record containing institutional branding, rules, and academic metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 200 },
+        "code": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "code", "status", "createdAt", "updatedAt"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Tenant-scoped student library member with optional Super-Admin-controlled Premium ID fields.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128 },
+        "studentIdCode": { "type": "string", "maxLength": 64 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "collegeRollNumber": { "type": "string", "maxLength": 64 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["active", "suspended", "inactive", "graduated"] },
+        "isPremium": { "type": "boolean" },
+        "premiumTier": { "type": "string", "maxLength": 64 },
+        "premiumDesign": { "type": "string", "maxLength": 64 },
+        "premiumBadgeLabel": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "studentIdCode", "fullName", "collegeRollNumber", "status", "createdAt", "updatedAt"]
+    },
+    "StudentApplication": {
+      "title": "StudentApplication",
+      "description": "Public student registration application awaiting College Admin or Librarian approval.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "fatherName": { "type": "string", "maxLength": 120 },
+        "collegeRollNumber": { "type": "string", "maxLength": 64 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "fullName", "collegeRollNumber", "email", "status", "createdAt", "updatedAt"]
+    },
+    "Book": {
+      "title": "Book",
+      "description": "Tenant-scoped library catalog title record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 300 },
+        "isbn": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "title", "status", "createdAt", "updatedAt"]
+    },
+    "BookCopy": {
+      "title": "BookCopy",
+      "description": "Individual physical book copy tracked by barcode and accession number.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookId": { "type": "string", "maxLength": 128 },
+        "barcode": { "type": "string", "maxLength": 120 },
+        "accessionNumber": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["available", "issued", "reserved", "damaged", "lost", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "bookId", "barcode", "status", "createdAt", "updatedAt"]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "Circulation loan record linking a student and a physical book copy.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentUserId": { "type": "string", "maxLength": 128 },
+        "bookId": { "type": "string", "maxLength": 128 },
+        "bookCopyId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["issued", "overdue", "returned", "lost"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "studentId", "bookId", "bookCopyId", "status", "createdAt", "updatedAt"]
+    },
+    "Reservation": {
+      "title": "Reservation",
+      "description": "Student book reservation request within a college library.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentUserId": { "type": "string", "maxLength": 128 },
+        "bookId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["queued", "ready", "fulfilled", "cancelled", "expired"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "studentId", "bookId", "status", "createdAt", "updatedAt"]
+    },
+    "Fine": {
+      "title": "Fine",
+      "description": "Library fine record issued to a student.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentUserId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["unpaid", "partial", "paid", "waived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "studentId", "status", "createdAt", "updatedAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User-scoped in-app notification.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 1000 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "recipientUid", "title", "message", "isRead", "createdAt"]
+    },
+    "OrgGenericRecord": {
+      "title": "OrgGenericRecord",
+      "description": "Tenant-scoped operational record (ID templates, ID cards, assignments, librarians, attendance, payments, migrations, assets, audit logs).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": { "schema": { "$ref": "#/entities/AdminRecord" }, "description": "Platform Super Admin authority registry." },
+    "/users/{uid}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "User profiles and auth status (strictly owner or Super Admin)." },
+    "/memberships/{membershipId}": { "schema": { "$ref": "#/entities/Membership" }, "description": "Deterministic tenant role memberships." },
+    "/pendingInvites/{inviteId}": { "schema": { "$ref": "#/entities/PendingInvite" }, "description": "Email-keyed pre-provisioned institutional invites." },
+    "/platformSettings/{settingKey}": { "schema": { "$ref": "#/entities/PlatformSetting" }, "description": "Platform configuration and password policy." },
+    "/publicOrganizations/{orgId}": { "schema": { "$ref": "#/entities/PublicOrganization" }, "description": "Public active college directory for registration." },
+    "/publicQrRegistry/{token}": { "schema": { "$ref": "#/entities/PublicQrRecord" }, "description": "Public non-PII QR verification lookup by token." },
+    "/founderIdentities/{founderId}": { "schema": { "$ref": "#/entities/FounderIdentity" }, "description": "Super-Admin-only Golden Founder Digital IDs." },
+    "/notifications/{notificationId}": { "schema": { "$ref": "#/entities/Notification" }, "description": "User-scoped notifications." },
+    "/platformAuditLogs/{logId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Immutable Platform Super Admin audit trail." },
+    "/organizations/{orgId}": { "schema": { "$ref": "#/entities/Organization" }, "description": "Tenant root document with branding, settings, and academics." },
+    "/organizations/{orgId}/students/{studentId}": { "schema": { "$ref": "#/entities/Student" }, "description": "College students with Super-Admin-gated Premium tier." },
+    "/organizations/{orgId}/studentApplications/{appId}": { "schema": { "$ref": "#/entities/StudentApplication" }, "description": "Student self-registration applications." },
+    "/organizations/{orgId}/idTemplates/{templateId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Digital ID card templates." },
+    "/organizations/{orgId}/idCards/{cardId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Issued student digital ID cards." },
+    "/organizations/{orgId}/idAssignments/{assignmentId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Course/batch ID template assignment runs." },
+    "/organizations/{orgId}/librarians/{librarianId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Institutional librarian staff records." },
+    "/organizations/{orgId}/books/{bookId}": { "schema": { "$ref": "#/entities/Book" }, "description": "Library catalog titles." },
+    "/organizations/{orgId}/bookCopies/{copyId}": { "schema": { "$ref": "#/entities/BookCopy" }, "description": "Physical barcoded book copies." },
+    "/organizations/{orgId}/loans/{loanId}": { "schema": { "$ref": "#/entities/Loan" }, "description": "Book issue/return circulation loans." },
+    "/organizations/{orgId}/reservations/{reservationId}": { "schema": { "$ref": "#/entities/Reservation" }, "description": "Book reservation queue." },
+    "/organizations/{orgId}/fines/{fineId}": { "schema": { "$ref": "#/entities/Fine" }, "description": "Student overdue/damage fines." },
+    "/organizations/{orgId}/finePayments/{paymentId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Fine payment receipts." },
+    "/organizations/{orgId}/attendance/{attendanceId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Library entry/exit attendance log." },
+    "/organizations/{orgId}/migrations/{migrationId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "CSV data migration history." },
+    "/organizations/{orgId}/assets/{assetId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Uploaded institutional logos and photos." },
+    "/organizations/{orgId}/auditLogs/{logId}": { "schema": { "$ref": "#/entities/OrgGenericRecord" }, "description": "Tenant-scoped immutable audit logs." }
+  }
+}

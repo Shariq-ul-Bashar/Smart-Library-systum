@@ -1,13 +1,14 @@
-let inMemoryToken: string | null = null;
-let tokenProvider: (() => Promise<string | null>) | null = null;
+import { dispatchFirebaseApi } from './firebase-backend/router.ts';
+import { BackendError } from './firebase-backend/helpers.ts';
+
 let activeOrgId: string | null = null;
 
-export function setApiToken(token: string | null) {
-  inMemoryToken = token;
+export function setApiToken(_token: string | null) {
+  // Firebase Authentication manages ID tokens natively via the Firebase SDK.
 }
 
-export function setApiTokenProvider(provider: (() => Promise<string | null>) | null) {
-  tokenProvider = provider;
+export function setApiTokenProvider(_provider: (() => Promise<string | null>) | null) {
+  // Firebase Authentication manages ID tokens natively via the Firebase SDK.
 }
 
 export function setApiOrganizationId(orgId: string | null) {
@@ -26,6 +27,11 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Firebase-only API dispatcher.
+ * All QIVORA operations execute directly against Firebase Authentication and Cloud Firestore,
+ * eliminating Express /api/* 404 errors on static deployments (such as Vercel).
+ */
 export async function apiRequest<T>(
   path: string,
   options: {
@@ -35,50 +41,24 @@ export async function apiRequest<T>(
     skipAuth?: boolean;
   } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (options.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-
-  if (!options.skipAuth) {
-    let token = inMemoryToken;
-    if (tokenProvider) {
-      const fresh = await tokenProvider();
-      if (fresh) token = fresh;
-    }
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-  }
-
   const orgId = options.organizationId !== undefined ? options.organizationId : activeOrgId;
-  if (orgId) {
-    headers['x-organization-id'] = orgId;
-  }
 
-  const res = await fetch(`/api${path}`, {
-    method: options.method || 'GET',
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
-
-  const text = await res.text();
-  let data: unknown = null;
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
+    return await dispatchFirebaseApi<T>(path, {
+      method: options.method || 'GET',
+      body: options.body,
+      organizationId: orgId,
+    });
+  } catch (err: unknown) {
+    if (err instanceof ApiError) {
+      throw err;
+    }
+    if (err instanceof BackendError) {
+      throw new ApiError(err.message, err.status);
+    }
+    const message = err instanceof Error ? err.message : 'Firebase request failed.';
+    throw new ApiError(message, 500);
   }
-
-  if (!res.ok) {
-    const errMsg =
-      (data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
-        ? (data as { error: string }).error
-        : null) || `Request failed (${res.status})`;
-    throw new ApiError(errMsg, res.status);
-  }
-
-  return data as T;
 }
 
 export async function uploadAssetFile(file: File, bucket: string): Promise<{ url: string; id: string }> {

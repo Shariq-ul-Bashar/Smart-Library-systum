@@ -1,0 +1,791 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net — default deny everything unless explicitly permitted below
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // PHASE 3: HARDENED GLOBAL PRIMITIVES & ROLE HELPERS
+    // =========================================================================
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isBootstrappedOwnerEmail() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email.lower() in ['mohammad@shariq.com', 'shariqansariboy@gmail.com'];
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        isBootstrappedOwnerEmail()
+      );
+    }
+
+    function normalizedAuthEmailKey() {
+      return request.auth.token.email.lower().replace('[^a-z0-9]', '_');
+    }
+
+    function hasActiveMembership(orgId, roleSlug) {
+      return isSignedIn() &&
+        isValidId(orgId) &&
+        exists(/databases/$(database)/documents/memberships/$(orgId + '_' + request.auth.uid + '_' + roleSlug)) &&
+        get(/databases/$(database)/documents/memberships/$(orgId + '_' + request.auth.uid + '_' + roleSlug)).data.status == 'active';
+    }
+
+    function isOrgAdmin(orgId) {
+      return isSuperAdmin() || hasActiveMembership(orgId, 'college_admin');
+    }
+
+    function isOrgStaff(orgId) {
+      return isSuperAdmin() || hasActiveMembership(orgId, 'college_admin') || hasActiveMembership(orgId, 'librarian');
+    }
+
+    function isOrgStudent(orgId) {
+      return hasActiveMembership(orgId, 'student');
+    }
+
+    function isOrgMember(orgId) {
+      return isOrgStaff(orgId) || isOrgStudent(orgId);
+    }
+
+    function orgExists(orgId) {
+      return isValidId(orgId) && exists(/databases/$(database)/documents/organizations/$(orgId));
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // =========================================================================
+    // VALIDATION BLUEPRINTS (ANTI-UPDATE-GAP)
+    // =========================================================================
+
+    function isValidAdminRecord(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'fullName', 'createdAt', 'updatedAt']) &&
+        data.uid == uid &&
+        isValidId(data.uid) &&
+        isValidString(data.email, 3, 200) &&
+        isValidString(data.fullName, 1, 120);
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'isSuperAdmin', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'uid', 'email', 'fullName', 'phone', 'avatarUrl',
+          'isSuperAdmin', 'mustChangePassword', 'status',
+          'passwordChangedAt', 'lastLoginAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid == uid &&
+        isValidId(data.uid) &&
+        isValidString(data.email, 3, 200) &&
+        isValidString(data.fullName, 1, 120) &&
+        isOptionalString(data, 'phone', 40) &&
+        isOptionalString(data, 'avatarUrl', 500000) &&
+        data.isSuperAdmin is bool &&
+        (!('mustChangePassword' in data) || data.mustChangePassword is bool) &&
+        data.status in ['active', 'suspended'];
+    }
+
+    function isValidMembership(data, membershipId) {
+      return data.keys().hasAll(['id', 'userId', 'organizationId', 'roleSlug', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'organizationId', 'organizationName', 'organizationCode',
+          'organizationStatus', 'roleSlug', 'roleName', 'status', 'isDefault',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id == membershipId &&
+        isValidId(data.userId) &&
+        isValidId(data.organizationId) &&
+        data.roleSlug in ['college_admin', 'librarian', 'student'] &&
+        data.status in ['active', 'suspended'];
+    }
+
+    function isValidPendingInvite(data, inviteId) {
+      return data.keys().hasAll(['id', 'email', 'organizationId', 'roleSlug', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'email', 'fullName', 'phone', 'organizationId', 'organizationName',
+          'organizationCode', 'roleSlug', 'studentId', 'librarianId', 'claimedByUid',
+          'mustChangePassword', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == inviteId &&
+        isValidString(data.email, 3, 200) &&
+        isValidId(data.organizationId) &&
+        data.roleSlug in ['college_admin', 'librarian', 'student'] &&
+        data.status in ['pending', 'claimed'];
+    }
+
+    function isValidPlatformSetting(data, settingKey) {
+      return data.keys().hasAll(['key', 'value', 'updatedAt']) &&
+        data.keys().hasOnly(['key', 'value', 'description', 'updatedAt']) &&
+        data.key == settingKey &&
+        isValidId(data.key) &&
+        data.value is map &&
+        isOptionalString(data, 'description', 400);
+    }
+
+    function isValidPublicOrganization(data, orgId) {
+      return data.keys().hasAll(['id', 'name', 'code', 'status', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'code', 'universityName', 'logoUrl', 'status',
+          'departments', 'courses', 'semesters', 'academicSessions', 'studentCategories',
+          'updatedAt'
+        ]) &&
+        data.id == orgId &&
+        isValidString(data.name, 1, 200) &&
+        isValidString(data.code, 1, 64) &&
+        data.status in ['active', 'suspended', 'pending'];
+    }
+
+    function isValidPublicQrRecord(data, token) {
+      return data.keys().hasAll(['token', 'entityType', 'entityId', 'isActive', 'status', 'credential', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'token', 'entityType', 'entityId', 'organizationId', 'isActive',
+          'status', 'reason', 'expiresAt', 'revokedAt', 'credential',
+          'founderBadge', 'premiumStudent', 'linkedCollege', 'updatedAt'
+        ]) &&
+        data.token == token &&
+        data.entityType in ['student_id', 'founder_id'] &&
+        isValidId(data.entityId) &&
+        data.isActive is bool &&
+        isValidString(data.status, 1, 40) &&
+        data.credential is map;
+    }
+
+    function isValidFounderIdentity(data, founderId) {
+      return data.keys().hasAll(['id', 'founderNumber', 'fullName', 'designation', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == founderId &&
+        isValidString(data.founderNumber, 2, 64) &&
+        isValidString(data.fullName, 1, 120) &&
+        isValidString(data.designation, 1, 120) &&
+        data.status in ['active', 'revoked'];
+    }
+
+    function isValidOrganization(data, orgId) {
+      return data.keys().hasAll(['id', 'name', 'code', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == orgId &&
+        isValidString(data.name, 1, 200) &&
+        isValidString(data.code, 1, 64) &&
+        data.status in ['active', 'suspended', 'pending'];
+    }
+
+    function isValidStudent(data, orgId, studentId) {
+      return data.keys().hasAll(['id', 'organizationId', 'studentIdCode', 'fullName', 'collegeRollNumber', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == studentId &&
+        data.organizationId == orgId &&
+        isValidString(data.studentIdCode, 1, 64) &&
+        isValidString(data.fullName, 1, 120) &&
+        isValidString(data.collegeRollNumber, 1, 64) &&
+        data.status in ['active', 'suspended', 'inactive', 'graduated'] &&
+        (!('isPremium' in data) || data.isPremium is bool);
+    }
+
+    function isValidStudentApplication(data, orgId, appId) {
+      return data.keys().hasAll(['id', 'organizationId', 'fullName', 'collegeRollNumber', 'email', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'organizationId', 'submittedByUid', 'fullName', 'fatherName',
+          'collegeRollNumber', 'universityRollNumber', 'proposedStudentId',
+          'courseId', 'semesterId', 'departmentId', 'academicSessionId',
+          'studentCategoryId', 'dateOfBirth', 'gender', 'phone', 'email',
+          'address', 'photoUrl', 'idProofUrl', 'status', 'reviewedByUid',
+          'reviewedAt', 'rejectionReason', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id == appId &&
+        data.organizationId == orgId &&
+        isValidString(data.fullName, 2, 120) &&
+        isOptionalString(data, 'fatherName', 120) &&
+        isValidString(data.collegeRollNumber, 1, 64) &&
+        isValidString(data.email, 3, 200) &&
+        isOptionalString(data, 'phone', 40) &&
+        isOptionalString(data, 'address', 400) &&
+        isOptionalString(data, 'photoUrl', 500000) &&
+        isOptionalString(data, 'idProofUrl', 500000) &&
+        data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function isValidBook(data, orgId, bookId) {
+      return data.keys().hasAll(['id', 'organizationId', 'title', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == bookId &&
+        data.organizationId == orgId &&
+        isValidString(data.title, 1, 300) &&
+        data.status in ['active', 'archived'];
+    }
+
+    function isValidBookCopy(data, orgId, copyId) {
+      return data.keys().hasAll(['id', 'organizationId', 'bookId', 'barcode', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == copyId &&
+        data.organizationId == orgId &&
+        isValidId(data.bookId) &&
+        isValidString(data.barcode, 1, 120) &&
+        data.status in ['available', 'issued', 'reserved', 'damaged', 'lost', 'archived'];
+    }
+
+    function isValidLoan(data, orgId, loanId) {
+      return data.keys().hasAll(['id', 'organizationId', 'studentId', 'bookId', 'bookCopyId', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == loanId &&
+        data.organizationId == orgId &&
+        isValidId(data.studentId) &&
+        isValidId(data.bookId) &&
+        isValidId(data.bookCopyId) &&
+        data.status in ['issued', 'overdue', 'returned', 'lost'];
+    }
+
+    function isValidReservation(data, orgId, resId) {
+      return data.keys().hasAll(['id', 'organizationId', 'studentId', 'bookId', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == resId &&
+        data.organizationId == orgId &&
+        isValidId(data.studentId) &&
+        isValidId(data.bookId) &&
+        data.status in ['queued', 'ready', 'fulfilled', 'cancelled', 'expired'];
+    }
+
+    function isValidFine(data, orgId, fineId) {
+      return data.keys().hasAll(['id', 'organizationId', 'studentId', 'status', 'createdAt', 'updatedAt']) &&
+        data.id == fineId &&
+        data.organizationId == orgId &&
+        isValidId(data.studentId) &&
+        data.status in ['unpaid', 'partial', 'paid', 'waived'];
+    }
+
+    function isValidNotification(data, notifId) {
+      return data.keys().hasAll(['id', 'recipientUid', 'title', 'message', 'isRead', 'createdAt']) &&
+        data.id == notifId &&
+        isValidId(data.recipientUid) &&
+        isValidString(data.title, 1, 200) &&
+        isValidString(data.message, 1, 1000) &&
+        data.isRead is bool;
+    }
+
+    function isValidOrgRecord(data, orgId, recId) {
+      return data.keys().hasAll(['id', 'organizationId', 'createdAt']) &&
+        data.id == recId &&
+        data.organizationId == orgId;
+    }
+
+    // =========================================================================
+    // CONNECTION HEALTH CHECK DOC
+    // =========================================================================
+
+    match /test/{docId} {
+      allow get: if isValidId(docId);
+      allow list, write: if false;
+    }
+
+    // =========================================================================
+    // PLATFORM SUPER ADMIN REGISTRY
+    // =========================================================================
+
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isSuperAdmin());
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(uid) && isValidAdminRecord(incoming(), uid) && (
+        isSuperAdmin() ||
+        (isOwner(uid) && isBootstrappedOwnerEmail())
+      );
+      allow update: if isValidId(uid) && isValidAdminRecord(incoming(), uid) && isSuperAdmin() &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
+    }
+
+    // =========================================================================
+    // USER PROFILES (PII ISOLATED TO OWNER OR SUPER ADMIN)
+    // =========================================================================
+
+    match /users/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isSuperAdmin());
+      allow list: if isSuperAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(uid) && isValidUserProfile(incoming(), uid) && (
+        isSuperAdmin() ||
+        (isOwner(uid) && incoming().isSuperAdmin == false && incoming().status == 'active') ||
+        (isOwner(uid) && isBootstrappedOwnerEmail() && incoming().status == 'active')
+      );
+      allow update: if isValidId(uid) && isValidUserProfile(incoming(), uid) && (
+        (isSuperAdmin() && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt) ||
+        (
+          isOwner(uid) &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().isSuperAdmin == existing().isSuperAdmin &&
+          incoming().status == existing().status &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'fullName', 'phone', 'avatarUrl', 'mustChangePassword',
+            'passwordChangedAt', 'lastLoginAt', 'email', 'updatedAt'
+          ])
+        )
+      );
+      allow delete: if isValidId(uid) && isSuperAdmin() && uid != request.auth.uid;
+    }
+
+    // =========================================================================
+    // MULTI-TENANT ROLE MEMBERSHIPS
+    // =========================================================================
+
+    match /memberships/{membershipId} {
+      allow get: if isValidId(membershipId) && (
+        isSuperAdmin() ||
+        (isSignedIn() && resource.data.userId == request.auth.uid) ||
+        isOrgAdmin(resource.data.organizationId)
+      );
+      allow list: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isSuperAdmin()
+      );
+      allow create: if isValidId(membershipId) && isValidMembership(incoming(), membershipId) &&
+        membershipId == (incoming().organizationId + '_' + incoming().userId + '_' + incoming().roleSlug) && (
+          isSuperAdmin() ||
+          (isOrgAdmin(incoming().organizationId) && incoming().roleSlug in ['librarian', 'student']) ||
+          (
+            isSignedIn() &&
+            incoming().userId == request.auth.uid &&
+            request.auth.token.email_verified == true &&
+            exists(/databases/$(database)/documents/pendingInvites/$(incoming().organizationId + '_' + incoming().roleSlug + '_' + normalizedAuthEmailKey()))
+          )
+        );
+      allow update: if isValidId(membershipId) && isValidMembership(incoming(), membershipId) &&
+        incoming().userId == existing().userId &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().roleSlug == existing().roleSlug &&
+        incoming().createdAt == existing().createdAt && (
+          isSuperAdmin() ||
+          (
+            isOrgAdmin(existing().organizationId) &&
+            existing().roleSlug in ['librarian', 'student'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'organizationName', 'organizationStatus', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(membershipId) && (
+        isSuperAdmin() ||
+        (isOrgAdmin(existing().organizationId) && existing().roleSlug in ['librarian', 'student'])
+      );
+    }
+
+    // =========================================================================
+    // PENDING INVITES (EMAIL-BOUND ROLE CLAIMING)
+    // =========================================================================
+
+    match /pendingInvites/{inviteId} {
+      allow get: if isValidId(inviteId) && (
+        isSuperAdmin() ||
+        isOrgAdmin(resource.data.organizationId) ||
+        (isSignedIn() && request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower())
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        (request.auth.token.email_verified == true && resource.data.email == request.auth.token.email.lower())
+      );
+      allow create: if isValidId(inviteId) && isValidPendingInvite(incoming(), inviteId) && (
+        isSuperAdmin() ||
+        (isOrgAdmin(incoming().organizationId) && incoming().roleSlug in ['librarian', 'student'])
+      );
+      allow update: if isValidId(inviteId) && isValidPendingInvite(incoming(), inviteId) && (
+        isSuperAdmin() ||
+        (
+          isSignedIn() &&
+          request.auth.token.email_verified == true &&
+          existing().email == request.auth.token.email.lower() &&
+          existing().status == 'pending' &&
+          incoming().status == 'claimed' &&
+          incoming().claimedByUid == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedByUid', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(inviteId) && (isSuperAdmin() || isOrgAdmin(existing().organizationId));
+    }
+
+    // =========================================================================
+    // PLATFORM SETTINGS & SETUP STATUS
+    // =========================================================================
+
+    match /platformSettings/{settingKey} {
+      allow get: if isValidId(settingKey) && (
+        settingKey == 'setup_status' ||
+        isSuperAdmin() ||
+        (isSignedIn() && settingKey in ['platform_identity', 'password_policy', 'security_defaults'])
+      );
+      allow list: if isSuperAdmin();
+      allow create, update: if isValidId(settingKey) && isValidPlatformSetting(incoming(), settingKey) && (
+        isSuperAdmin() ||
+        (settingKey == 'setup_status' && isSignedIn() && isBootstrappedOwnerEmail())
+      );
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // PUBLIC ORGANIZATION DIRECTORY (STRICTLY NON-PII)
+    // =========================================================================
+
+    match /publicOrganizations/{orgId} {
+      allow get: if isValidId(orgId) && (resource.data.status == 'active' || isSuperAdmin() || isOrgMember(orgId));
+      allow list: if resource.data.status == 'active' || isSuperAdmin();
+      allow create, update: if isValidId(orgId) && isValidPublicOrganization(incoming(), orgId) && (
+        isSuperAdmin() || isOrgAdmin(orgId)
+      );
+      allow delete: if isValidId(orgId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // PUBLIC QR VERIFICATION REGISTRY (GET-ONLY, ZERO PII, NO LIST)
+    // =========================================================================
+
+    match /publicQrRegistry/{token} {
+      allow get: if isValidId(token);
+      allow list: if false;
+      allow create, update: if isValidId(token) && isValidPublicQrRecord(incoming(), token) && (
+        isSuperAdmin() ||
+        (incoming().entityType == 'student_id' && 'organizationId' in incoming() && isOrgStaff(incoming().organizationId))
+      );
+      allow delete: if isValidId(token) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // EXCLUSIVE GOLDEN FOUNDER IDENTITIES (SUPER ADMIN WRITE-ONLY)
+    // =========================================================================
+
+    match /founderIdentities/{founderId} {
+      allow get: if isValidId(founderId) && (
+        isSuperAdmin() ||
+        (isSignedIn() && resource.data.linkedUserId == request.auth.uid) ||
+        ('linkedOrganizationId' in resource.data && resource.data.linkedOrganizationId != null && isOrgStaff(resource.data.linkedOrganizationId))
+      );
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.linkedUserId == request.auth.uid
+      );
+      allow create: if isValidId(founderId) && isValidFounderIdentity(incoming(), founderId) && isSuperAdmin();
+      allow update: if isValidId(founderId) && isValidFounderIdentity(incoming(), founderId) && isSuperAdmin() &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(founderId) && isSuperAdmin();
+    }
+
+    // =========================================================================
+    // USER NOTIFICATIONS
+    // =========================================================================
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && isSignedIn() && (
+        resource.data.recipientUid == request.auth.uid || isSuperAdmin()
+      );
+      allow list: if isSignedIn() && resource.data.recipientUid == request.auth.uid;
+      allow create: if isValidId(notifId) && isValidNotification(incoming(), notifId) && (
+        isSuperAdmin() ||
+        ('organizationId' in incoming() && incoming().organizationId != null && isOrgStaff(incoming().organizationId))
+      );
+      allow update: if isValidId(notifId) && isValidNotification(incoming(), notifId) &&
+        isSignedIn() &&
+        existing().recipientUid == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isValidId(notifId) && (isSuperAdmin() || (isSignedIn() && existing().recipientUid == request.auth.uid));
+    }
+
+    // =========================================================================
+    // PLATFORM AUDIT LOGS (IMMUTABLE, SUPER ADMIN ONLY)
+    // =========================================================================
+
+    match /platformAuditLogs/{logId} {
+      allow get: if isValidId(logId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(logId) && isSuperAdmin() && incoming().id == logId;
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // MULTI-TENANT ORGANIZATIONS & MASTER-GATED SUBCOLLECTIONS
+    // =========================================================================
+
+    match /organizations/{orgId} {
+      allow get: if isValidId(orgId) && isOrgMember(orgId);
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(orgId) && isValidOrganization(incoming(), orgId) && isSuperAdmin();
+      allow update: if isValidId(orgId) && isValidOrganization(incoming(), orgId) && (
+        (isSuperAdmin() && incoming().id == existing().id && incoming().createdAt == existing().createdAt) ||
+        (
+          isOrgAdmin(orgId) &&
+          incoming().id == existing().id &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().status == existing().status &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'branding', 'settings', 'departments', 'courses', 'semesters',
+            'academicSessions', 'studentCategories', 'categories', 'authors',
+            'shelves', 'notificationTemplates', 'notificationPreferences',
+            'automationJobs', 'automationLogs', 'updatedAt'
+          ])
+        )
+      );
+      allow delete: if isValidId(orgId) && isSuperAdmin();
+
+      // --- STUDENTS (Premium tier strictly Super Admin only!) ---
+      match /students/{studentId} {
+        allow get: if isValidId(orgId) && isValidId(studentId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.userId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.userId == request.auth.uid)
+        );
+        allow create: if isValidId(orgId) && isValidId(studentId) && orgExists(orgId) &&
+          isValidStudent(incoming(), orgId, studentId) && (
+            isSuperAdmin() ||
+            (
+              isOrgStaff(orgId) &&
+              (!('isPremium' in incoming()) || incoming().isPremium == false)
+            )
+          );
+        allow update: if isValidId(orgId) && isValidId(studentId) && orgExists(orgId) &&
+          isValidStudent(incoming(), orgId, studentId) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt && (
+            isSuperAdmin() ||
+            (
+              isOrgStaff(orgId) &&
+              !incoming().diff(existing()).affectedKeys().hasAny([
+                'isPremium', 'premiumTier', 'premiumDesign', 'premiumBadgeLabel',
+                'premiumGrantedAt', 'premiumGrantedByProfileId', 'premiumNote'
+              ])
+            ) ||
+            (
+              isSignedIn() &&
+              existing().userId == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['phone', 'address', 'photoUrl', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(orgId) && isValidId(studentId) && isOrgAdmin(orgId);
+      }
+
+      // --- STUDENT REGISTRATION APPLICATIONS ---
+      match /studentApplications/{appId} {
+        allow get: if isValidId(orgId) && isValidId(appId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create: if isValidId(orgId) && isValidId(appId) && orgExists(orgId) &&
+          isValidStudentApplication(incoming(), orgId, appId) &&
+          incoming().status == 'pending';
+        allow update: if isValidId(orgId) && isValidId(appId) && orgExists(orgId) &&
+          isValidStudentApplication(incoming(), orgId, appId) &&
+          isOrgStaff(orgId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt;
+        allow delete: if isValidId(orgId) && isValidId(appId) && isOrgAdmin(orgId);
+      }
+
+      // --- BOOKS CATALOG ---
+      match /books/{bookId} {
+        allow get: if isValidId(orgId) && isValidId(bookId) && orgExists(orgId) && isOrgMember(orgId);
+        allow list: if isValidId(orgId) && isOrgMember(orgId);
+        allow create: if isValidId(orgId) && isValidId(bookId) && orgExists(orgId) &&
+          isValidBook(incoming(), orgId, bookId) && isOrgStaff(orgId);
+        allow update: if isValidId(orgId) && isValidId(bookId) && orgExists(orgId) &&
+          isValidBook(incoming(), orgId, bookId) && isOrgStaff(orgId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt;
+        allow delete: if isValidId(orgId) && isValidId(bookId) && isOrgAdmin(orgId);
+      }
+
+      // --- PHYSICAL BOOK COPIES ---
+      match /bookCopies/{copyId} {
+        allow get: if isValidId(orgId) && isValidId(copyId) && orgExists(orgId) && isOrgMember(orgId);
+        allow list: if isValidId(orgId) && isOrgMember(orgId);
+        allow create: if isValidId(orgId) && isValidId(copyId) && orgExists(orgId) &&
+          isValidBookCopy(incoming(), orgId, copyId) && isOrgStaff(orgId);
+        allow update: if isValidId(orgId) && isValidId(copyId) && orgExists(orgId) &&
+          isValidBookCopy(incoming(), orgId, copyId) && isOrgStaff(orgId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt;
+        allow delete: if isValidId(orgId) && isValidId(copyId) && isOrgAdmin(orgId);
+      }
+
+      // --- CIRCULATION LOANS ---
+      match /loans/{loanId} {
+        allow get: if isValidId(orgId) && isValidId(loanId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow create: if isValidId(orgId) && isValidId(loanId) && orgExists(orgId) &&
+          isValidLoan(incoming(), orgId, loanId) && isOrgStaff(orgId);
+        allow update: if isValidId(orgId) && isValidId(loanId) && orgExists(orgId) &&
+          isValidLoan(incoming(), orgId, loanId) && isOrgStaff(orgId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt;
+        allow delete: if isValidId(orgId) && isValidId(loanId) && isSuperAdmin();
+      }
+
+      // --- BOOK RESERVATIONS ---
+      match /reservations/{resId} {
+        allow get: if isValidId(orgId) && isValidId(resId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow create: if isValidId(orgId) && isValidId(resId) && orgExists(orgId) &&
+          isValidReservation(incoming(), orgId, resId) && (
+            isOrgStaff(orgId) ||
+            (isOrgStudent(orgId) && incoming().studentUserId == request.auth.uid && incoming().status == 'queued')
+          );
+        allow update: if isValidId(orgId) && isValidId(resId) && orgExists(orgId) &&
+          isValidReservation(incoming(), orgId, resId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt && (
+            isOrgStaff(orgId) ||
+            (
+              isOrgStudent(orgId) &&
+              existing().studentUserId == request.auth.uid &&
+              incoming().status == 'cancelled' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(orgId) && isValidId(resId) && isOrgAdmin(orgId);
+      }
+
+      // --- FINES ---
+      match /fines/{fineId} {
+        allow get: if isValidId(orgId) && isValidId(fineId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow create: if isValidId(orgId) && isValidId(fineId) && orgExists(orgId) &&
+          isValidFine(incoming(), orgId, fineId) && isOrgStaff(orgId);
+        allow update: if isValidId(orgId) && isValidId(fineId) && orgExists(orgId) &&
+          isValidFine(incoming(), orgId, fineId) && isOrgStaff(orgId) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().createdAt == existing().createdAt;
+        allow delete: if isValidId(orgId) && isValidId(fineId) && isSuperAdmin();
+      }
+
+      // --- DIGITAL ID CARDS ---
+      match /idCards/{cardId} {
+        allow get: if isValidId(orgId) && isValidId(cardId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow create: if isValidId(orgId) && isValidId(cardId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, cardId) && isOrgStaff(orgId);
+        allow update: if isValidId(orgId) && isValidId(cardId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, cardId) && (
+            isOrgStaff(orgId) ||
+            (
+              isOrgStudent(orgId) &&
+              existing().studentUserId == request.auth.uid &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['studentCustomTheme', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(orgId) && isValidId(cardId) && isOrgAdmin(orgId);
+      }
+
+      // --- ID TEMPLATES, ASSIGNMENTS, LIBRARIANS, ATTENDANCE, PAYMENTS, MIGRATIONS, ASSETS ---
+      match /idTemplates/{templateId} {
+        allow get: if isValidId(orgId) && isValidId(templateId) && orgExists(orgId) && isOrgMember(orgId);
+        allow list: if isValidId(orgId) && isOrgMember(orgId);
+        allow create, update: if isValidId(orgId) && isValidId(templateId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, templateId) && isOrgAdmin(orgId);
+        allow delete: if isValidId(orgId) && isValidId(templateId) && isOrgAdmin(orgId);
+      }
+
+      match /idAssignments/{assignmentId} {
+        allow get: if isValidId(orgId) && isValidId(assignmentId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create, update: if isValidId(orgId) && isValidId(assignmentId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, assignmentId) && isOrgAdmin(orgId);
+        allow delete: if isValidId(orgId) && isValidId(assignmentId) && isOrgAdmin(orgId);
+      }
+
+      match /librarians/{librarianId} {
+        allow get: if isValidId(orgId) && isValidId(librarianId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create, update: if isValidId(orgId) && isValidId(librarianId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, librarianId) && isOrgAdmin(orgId);
+        allow delete: if isValidId(orgId) && isValidId(librarianId) && isOrgAdmin(orgId);
+      }
+
+      match /finePayments/{paymentId} {
+        allow get: if isValidId(orgId) && isValidId(paymentId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create: if isValidId(orgId) && isValidId(paymentId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, paymentId) && isOrgStaff(orgId);
+        allow update, delete: if false;
+      }
+
+      match /attendance/{attendanceId} {
+        allow get: if isValidId(orgId) && isValidId(attendanceId) && orgExists(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow list: if isValidId(orgId) && (
+          isOrgStaff(orgId) ||
+          (isSignedIn() && resource.data.studentUserId == request.auth.uid)
+        );
+        allow create, update: if isValidId(orgId) && isValidId(attendanceId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, attendanceId) && isOrgStaff(orgId);
+        allow delete: if isValidId(orgId) && isValidId(attendanceId) && isOrgAdmin(orgId);
+      }
+
+      match /migrations/{migrationId} {
+        allow get: if isValidId(orgId) && isValidId(migrationId) && orgExists(orgId) && isOrgAdmin(orgId);
+        allow list: if isValidId(orgId) && isOrgAdmin(orgId);
+        allow create, update: if isValidId(orgId) && isValidId(migrationId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, migrationId) && isOrgAdmin(orgId);
+        allow delete: if isValidId(orgId) && isValidId(migrationId) && isSuperAdmin();
+      }
+
+      match /assets/{assetId} {
+        allow get: if isValidId(orgId) && isValidId(assetId) && orgExists(orgId) && isOrgMember(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create: if isValidId(orgId) && isValidId(assetId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, assetId) && isOrgMember(orgId);
+        allow update, delete: if isValidId(orgId) && isValidId(assetId) && isOrgAdmin(orgId);
+      }
+
+      match /auditLogs/{logId} {
+        allow get: if isValidId(orgId) && isValidId(logId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
+        allow create: if isValidId(orgId) && isValidId(logId) && orgExists(orgId) &&
+          isValidOrgRecord(incoming(), orgId, logId) && isOrgStaff(orgId);
+        allow update, delete: if false;
+      }
+    }
+  }
+}
