@@ -376,6 +376,7 @@ service cloud.firestore {
         membershipId == (incoming().organizationId + '_' + incoming().userId + '_' + incoming().roleSlug) && (
           isSuperAdmin() ||
           (isOrgAdmin(incoming().organizationId) && incoming().roleSlug in ['librarian', 'student']) ||
+          (isOrgStaff(incoming().organizationId) && incoming().roleSlug == 'student') ||
           (
             hasTokenEmail() &&
             isEmailVerified() &&
@@ -393,6 +394,11 @@ service cloud.firestore {
             isOrgAdmin(existing().organizationId) &&
             existing().roleSlug in ['librarian', 'student'] &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'organizationName', 'organizationStatus', 'updatedAt'])
+          ) ||
+          (
+            isOrgStaff(existing().organizationId) &&
+            existing().roleSlug == 'student' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
           )
         );
       allow delete: if isValidId(membershipId) && (
@@ -417,7 +423,8 @@ service cloud.firestore {
       );
       allow create: if isValidId(inviteId) && isValidPendingInvite(incoming(), inviteId) && (
         isSuperAdmin() ||
-        (isOrgAdmin(incoming().organizationId) && incoming().roleSlug in ['librarian', 'student'])
+        (isOrgAdmin(incoming().organizationId) && incoming().roleSlug in ['librarian', 'student']) ||
+        (isOrgStaff(incoming().organizationId) && incoming().roleSlug == 'student')
       );
       allow update: if isValidId(inviteId) && isValidPendingInvite(incoming(), inviteId) && (
         isSuperAdmin() ||
@@ -491,7 +498,8 @@ service cloud.firestore {
       );
       allow list: if isSignedIn() && (
         isSuperAdmin() ||
-        resource.data.linkedUserId == request.auth.uid
+        resource.data.linkedUserId == request.auth.uid ||
+        ('linkedOrganizationId' in resource.data && resource.data.linkedOrganizationId != null && isOrgStaff(resource.data.linkedOrganizationId))
       );
       allow create: if isValidId(founderId) && isValidFounderIdentity(incoming(), founderId) && isSuperAdmin();
       allow update: if isValidId(founderId) && isValidFounderIdentity(incoming(), founderId) && isSuperAdmin() &&
@@ -551,6 +559,16 @@ service cloud.firestore {
             'academicSessions', 'studentCategories', 'categories', 'authors',
             'shelves', 'notificationTemplates', 'notificationPreferences',
             'automationJobs', 'automationLogs', 'updatedAt'
+          ])
+        ) ||
+        (
+          isOrgStaff(orgId) &&
+          incoming().id == existing().id &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().status == existing().status &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'categories', 'authors', 'shelves',
+            'notificationPreferences', 'automationJobs', 'automationLogs', 'updatedAt'
           ])
         )
       );

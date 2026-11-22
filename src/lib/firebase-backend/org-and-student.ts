@@ -485,18 +485,20 @@ export async function handleOrgAndStudentRoute(
       }
 
       if (uid) {
-        await safeSetDoc(`users/${uid}`, {
-          uid,
-          email,
-          fullName: fullName.slice(0, 120),
-          phone: body?.phone || null,
-          avatarUrl: null,
-          isSuperAdmin: false,
-          mustChangePassword: false,
-          status: 'active',
-          createdAt: ts,
-          updatedAt: ts,
-        }).catch(() => {});
+        if (ctx.profile.isSuperAdmin) {
+          await safeSetDoc(`users/${uid}`, {
+            uid,
+            email,
+            fullName: fullName.slice(0, 120),
+            phone: body?.phone || null,
+            avatarUrl: null,
+            isSuperAdmin: false,
+            mustChangePassword: false,
+            status: 'active',
+            createdAt: ts,
+            updatedAt: ts,
+          }).catch(() => {});
+        }
         const memId = `${ctx.orgId}_${uid}_librarian`;
         await safeSetDoc(`memberships/${memId}`, {
           id: memId,
@@ -664,7 +666,9 @@ export async function handleOrgAndStudentRoute(
       const [students, cards, founders] = await Promise.all([
         safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
         safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/idCards`),
-        safeListDocs<Record<string, any>>('founderIdentities').catch(() => []),
+        safeListDocs<Record<string, any>>('founderIdentities', [
+          where('linkedOrganizationId', '==', ctx.orgId),
+        ]).catch(() => []),
       ]);
       const courseMap = new Map((org.courses || []).map((c: any) => [c.id, c.name]));
       const semMap = new Map((org.semesters || []).map((s: any) => [s.id, s.name]));
@@ -1998,18 +2002,20 @@ async function createSingleStudentInOrg(org: Record<string, any>, input: any, ac
   const studentIdCode = `STU-${String(org.code || 'ORG').slice(0, 4).toUpperCase()}-${Math.floor(10000 + Math.random() * 90000)}`;
 
   if (uid) {
-    await safeSetDoc(`users/${uid}`, {
-      uid,
-      email,
-      fullName: fullName.slice(0, 120),
-      phone: input?.phone || null,
-      avatarUrl: input?.photoUrl || null,
-      isSuperAdmin: false,
-      mustChangePassword: false,
-      status: 'active',
-      createdAt: ts,
-      updatedAt: ts,
-    }).catch(() => {});
+    if (actorRole === 'super_admin') {
+      await safeSetDoc(`users/${uid}`, {
+        uid,
+        email,
+        fullName: fullName.slice(0, 120),
+        phone: input?.phone || null,
+        avatarUrl: input?.photoUrl || null,
+        isSuperAdmin: false,
+        mustChangePassword: false,
+        status: 'active',
+        createdAt: ts,
+        updatedAt: ts,
+      }).catch(() => {});
+    }
     const memId = `${org.id}_${uid}_student`;
     await safeSetDoc(`memberships/${memId}`, {
       id: memId,
