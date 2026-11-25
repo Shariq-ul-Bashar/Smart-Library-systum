@@ -153,7 +153,7 @@ export function MigrationCenterPage() {
 
   const schemaSpec = TARGET_SCHEMAS[importType];
 
-  const { data: historyData, isLoading: historyLoading } = useQuery({
+  const { data: historyData, isLoading: historyLoading, isError: historyError, refetch: refetchHistory } = useQuery({
     queryKey: ['org-migration-history'],
     queryFn: () => apiRequest<{ runs: MigrationRun[] }>('/org/migrations/history'),
   });
@@ -246,7 +246,7 @@ export function MigrationCenterPage() {
       setStep(4);
       queryClient.invalidateQueries({ queryKey: ['org-migration-history'] });
       queryClient.invalidateQueries({ queryKey: ['org-overview'] });
-      toast.success(`Imported ${res.importedCount} record(s) into PostgreSQL.`);
+      toast.success(`Imported ${res.importedCount} record(s) into Cloud Firestore.`);
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -538,7 +538,7 @@ export function MigrationCenterPage() {
           </h2>
           <p className="text-sm text-slate-600 dark:text-slate-400">
             Imported <strong>{commitSummary.importedCount}</strong> record(s) from{' '}
-            <span className="font-mono">{commitSummary.run.fileName}</span> into PostgreSQL and logged the audit trail.
+            <span className="font-mono">{commitSummary.run.fileName}</span> into Cloud Firestore and logged the audit trail.
           </p>
           <div className="pt-2">
             <Button size="sm" onClick={resetWizard}>
@@ -558,6 +558,14 @@ export function MigrationCenterPage() {
         {historyLoading ? (
           <div className="p-5">
             <SkeletonRows rows={3} />
+          </div>
+        ) : historyError ? (
+          <div className="p-6">
+            <EmptyState
+              title="Unable to load migration history"
+              description="Please try again to view completed CSV imports."
+              action={<Button size="sm" onClick={() => refetchHistory()}>Retry</Button>}
+            />
           </div>
         ) : !historyData?.runs?.length ? (
           <div className="p-6">

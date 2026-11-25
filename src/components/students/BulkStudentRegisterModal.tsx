@@ -126,6 +126,19 @@ export function BulkStudentRegisterModal({
     failed: FailedStudentRow[];
     summary: { total: number; createdCount: number; failedCount: number };
   } | null>(null);
+  const [exportCourseFilter, setExportCourseFilter] = useState<string>('all');
+
+  const createdCourses = useMemo(() => {
+    if (!result?.created?.length) return [] as Array<{ course: string; count: number }>;
+    const counts = new Map<string, number>();
+    for (const c of result.created) {
+      const label = (c.departmentOrCourse || 'General').trim() || 'General';
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([course, count]) => ({ course, count }))
+      .sort((a, b) => a.course.localeCompare(b.course));
+  }, [result?.created]);
 
   const filteredSemesters = useMemo(
     () => semesters.filter((s) => !defaultCourseId || s.courseId === defaultCourseId),
@@ -322,22 +335,47 @@ export function BulkStudentRegisterModal({
     }
   };
 
-  const handleDownloadCredentialsCsv = () => {
+  const handleDownloadCredentialsCsv = (courseFilter = 'all') => {
     if (!result?.created.length) return;
+    const filteredRows =
+      courseFilter === 'all'
+        ? [...result.created].sort((a, b) =>
+            String(a.departmentOrCourse || 'General').localeCompare(
+              String(b.departmentOrCourse || 'General')
+            )
+          )
+        : result.created.filter(
+            (c) => ((c.departmentOrCourse || 'General').trim() || 'General') === courseFilter
+          );
+    if (!filteredRows.length) {
+      toast.error('No created student rows matched that course filter.');
+      return;
+    }
+    const slug =
+      courseFilter === 'all'
+        ? 'all-courses'
+        : courseFilter
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '') || 'course';
     exportToCsv(
-      `qivora-student-credentials-${new Date().toISOString().slice(0, 10)}.csv`,
-      result.created.map((c) => ({
+      `qivora-student-credentials-${slug}-${new Date().toISOString().slice(0, 10)}.csv`,
+      filteredRows.map((c) => ({
+        DepartmentCourse: c.departmentOrCourse || 'General',
         Name: c.fullName,
         RollNo: c.collegeRollNumber,
         StudentID: c.studentIdCode,
-        DepartmentCourse: c.departmentOrCourse,
         LoginID_Email: c.loginId,
-        Password: c.password,
+        TemporaryPassword: c.password,
         Phone: c.phone,
         DigitalIDCard: c.cardNumber || '',
       }))
     );
-    toast.success('Credentials CSV downloaded.');
+    toast.success(
+      courseFilter === 'all'
+        ? `Downloaded credentials CSV for all ${filteredRows.length} student(s) (sorted by course).`
+        : `Downloaded ${courseFilter} credentials CSV (${filteredRows.length} student(s)).`
+    );
   };
 
   const handlePrintCredentials = () => {
@@ -463,27 +501,64 @@ export function BulkStudentRegisterModal({
             </div>
           </div>
 
-          {/* Credentials Distribution Toolbar */}
+          {/* Credentials Distribution Toolbar (One-Time Export + Course-Wise CSV) */}
           {result.created.length > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#2563EB]/25 bg-[#EFF6FF] dark:bg-[#1E3A8A]/20 px-4 py-3">
-              <div className="flex items-center gap-2 text-xs text-[#1E40AF] dark:text-blue-200 font-medium">
-                <KeyRound className="h-4 w-4 shrink-0" />
-                Ready to distribute login credentials for {result.created.length} student(s)
+            <div className="space-y-3 rounded-xl border border-[#2563EB]/25 bg-[#EFF6FF] dark:bg-[#1E3A8A]/20 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs text-[#1E40AF] dark:text-blue-200 font-medium">
+                  <KeyRound className="h-4 w-4 shrink-0" />
+                  One-time credentials ready for {result.created.length} student(s) — export before closing
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={handleCopyAllCredentials}>
+                    <Copy className="h-3.5 w-3.5" />
+                    Copy All
+                  </Button>
+                  <Select
+                    value={exportCourseFilter}
+                    onChange={(e) => setExportCourseFilter(e.target.value)}
+                    className="h-8 w-44 text-xs bg-white dark:bg-slate-900"
+                    aria-label="Course filter for CSV export"
+                  >
+                    <option value="all">All Courses ({result.created.length})</option>
+                    {createdCourses.map((c) => (
+                      <option key={c.course} value={c.course}>
+                        {c.course} ({c.count})
+                      </option>
+                    ))}
+                  </Select>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleDownloadCredentialsCsv(exportCourseFilter)}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    {exportCourseFilter === 'all' ? 'Download CSV (All)' : `CSV · ${exportCourseFilter}`}
+                  </Button>
+                  <Button size="sm" onClick={handlePrintCredentials}>
+                    <Printer className="h-3.5 w-3.5" />
+                    Print Credentials
+                  </Button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" variant="outline" onClick={handleCopyAllCredentials}>
-                  <Copy className="h-3.5 w-3.5" />
-                  Copy All
-                </Button>
-                <Button size="sm" variant="outline" onClick={handleDownloadCredentialsCsv}>
-                  <Download className="h-3.5 w-3.5" />
-                  Download CSV
-                </Button>
-                <Button size="sm" onClick={handlePrintCredentials}>
-                  <Printer className="h-3.5 w-3.5" />
-                  Print Credentials
-                </Button>
-              </div>
+              {createdCourses.length > 1 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-blue-200/70 dark:border-blue-800/60">
+                  <span className="text-[11px] font-medium text-[#1E40AF] dark:text-blue-300 mr-1">
+                    Quick Course-Wise CSV:
+                  </span>
+                  {createdCourses.map((c) => (
+                    <button
+                      key={c.course}
+                      type="button"
+                      onClick={() => handleDownloadCredentialsCsv(c.course)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-2.5 py-1 text-[11px] font-medium text-[#1E40AF] hover:bg-blue-50 dark:border-blue-800 dark:bg-slate-900 dark:text-blue-200 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      <Download className="h-3 w-3" />
+                      {c.course} ({c.count})
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

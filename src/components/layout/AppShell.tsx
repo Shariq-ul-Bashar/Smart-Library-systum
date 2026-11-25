@@ -701,7 +701,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               onClick={toggleTheme}
               aria-label="Toggle color theme"
               title={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
-              className="rounded-xl p-2 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
+              className="rounded-xl border border-slate-200/80 bg-white p-2 text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F46E5] dark:border-slate-700 dark:bg-slate-900 dark:text-amber-400 dark:hover:bg-slate-800 transition-colors cursor-pointer"
             >
               {resolvedTheme === 'dark' ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
             </button>

@@ -51,8 +51,20 @@ export function VerifyQrPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerifyResult | null>(null);
 
+  const extractCleanToken = (raw: string) => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return '';
+    if (trimmed.includes('/verify/')) {
+      return trimmed.split('/verify/').pop()?.split(/[?#]/)[0]?.trim() || trimmed;
+    }
+    if (/^qiv:/i.test(trimmed)) {
+      return trimmed.replace(/^qiv:/i, '').trim();
+    }
+    return trimmed;
+  };
+
   const verifyToken = async (raw: string) => {
-    const clean = raw.includes('/verify/') ? raw.split('/verify/').pop()?.trim() || raw.trim() : raw.trim();
+    const clean = extractCleanToken(raw);
     if (!clean) return;
     setLoading(true);
     try {
@@ -79,9 +91,7 @@ export function VerifyQrPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = inputToken.includes('/verify/')
-      ? inputToken.split('/verify/').pop()?.trim() || inputToken.trim()
-      : inputToken.trim();
+    const clean = extractCleanToken(inputToken);
     if (!clean) return;
     navigate(`/verify/${encodeURIComponent(clean)}`);
   };
@@ -100,7 +110,8 @@ export function VerifyQrPage() {
               type="button"
               onClick={toggleTheme}
               aria-label="Toggle theme"
-              className="rounded-lg border border-slate-200 bg-white p-2 text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 cursor-pointer"
+              title={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
+              className="rounded-xl border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#4F46E5] dark:border-slate-700 dark:bg-slate-900 dark:text-amber-400 dark:hover:bg-slate-800 transition-colors cursor-pointer"
             >
               {resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
@@ -359,9 +370,7 @@ export function VerifyQrPage() {
         onClose={() => setScannerOpen(false)}
         title="Scan Digital ID QR Code"
         onScan={(scanned) => {
-          const clean = scanned.includes('/verify/')
-            ? scanned.split('/verify/').pop()?.trim() || scanned
-            : scanned;
+          const clean = extractCleanToken(scanned);
           setInputToken(clean);
           navigate(`/verify/${encodeURIComponent(clean)}`);
         }}

@@ -32,6 +32,7 @@ import {
   EmptyState,
   Input,
   MetricTile,
+  Select,
   SkeletonRows,
   SurfaceCard,
 } from '../../components/ui/primitives.tsx';
@@ -71,6 +72,7 @@ interface EnterpriseAnalyticsResponse {
   fineCollectionTrends: Array<{ month: string; collected: number }>;
   mostBorrowedBooks: Array<{ title: string; borrows: number }>;
   mostActiveStudents: Array<{ name: string; rollNumber: string; borrows: number }>;
+  courses?: Array<{ id: string; name: string; code: string }>;
 }
 
 const PIE_COLORS = ['#10B981', '#2563EB', '#7C3AED', '#EF4444'];
@@ -108,51 +110,74 @@ export function EnterpriseAnalyticsPage() {
   const [range, setRange] = useState<'7d' | '30d' | '90d' | 'year' | 'custom'>('30d');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [courseId, setCourseId] = useState('all');
 
   const orgName =
     activeWorkspace?.type === 'organization'
       ? activeWorkspace.membership.organizationName
       : 'QIVORA Library';
 
-  const queryParams =
-    range === 'custom' && fromDate && toDate
-      ? `?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}`
-      : `?range=${range === 'custom' ? '30d' : range}`;
+  const params = new URLSearchParams();
+  if (range === 'custom' && fromDate && toDate) {
+    params.set('from', fromDate);
+    params.set('to', toDate);
+  } else {
+    params.set('range', range === 'custom' ? '30d' : range);
+  }
+  if (courseId && courseId !== 'all') {
+    params.set('courseId', courseId);
+  }
+  const queryParams = `?${params.toString()}`;
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['enterprise-analytics', range, fromDate, toDate],
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['enterprise-analytics', range, fromDate, toDate, courseId],
     queryFn: () => apiRequest<EnterpriseAnalyticsResponse>(`/org/analytics/enterprise${queryParams}`),
   });
 
+  const dailyCirculation = data?.dailyCirculation || [];
+  const monthlyCirculation = data?.monthlyCirculation || [];
+  const monthlyRegistrations = data?.monthlyRegistrations || [];
+  const courseWiseMembership = data?.courseWiseMembership || [];
+  const categoryDistribution = data?.categoryDistribution || [];
+  const inventoryBreakdown = data?.inventoryBreakdown || [];
+  const monthlyVisitors = data?.monthlyVisitors || [];
+  const peakVisitingHours = data?.peakVisitingHours || [];
+  const fineCollectionTrends = data?.fineCollectionTrends || [];
+  const mostBorrowedBooks = data?.mostBorrowedBooks || [];
+  const mostActiveStudents = data?.mostActiveStudents || [];
+  const courses = data?.courses || [];
+
   const handleExportCsv = () => {
     if (!data) return;
-    exportToCsv(`qivora-analytics-${range}.csv`, data.dailyCirculation);
+    exportToCsv(`qivora-analytics-${range}.csv`, dailyCirculation);
   };
 
   const handleExportExcel = () => {
     if (!data) return;
-    const rows = data.mostBorrowedBooks.length
-      ? data.mostBorrowedBooks
-      : [{ title: 'Summary', borrows: data.summary.issuesInRange }];
+    const rows = mostBorrowedBooks.length
+      ? mostBorrowedBooks
+      : [{ title: 'Summary', borrows: data.summary?.issuesInRange ?? 0 }];
     exportToExcel(`qivora-analytics-${range}`, rows);
   };
 
   const handleExportPdf = () => {
-    if (!data) return;
+    if (!data?.summary) return;
     const s = data.summary;
+    const selectedCourseName =
+      courseId !== 'all' ? courses.find((c) => c.id === courseId)?.name : null;
     downloadReportPdf({
       title: 'Enterprise Library Operations & Circulation Report',
       organizationName: orgName,
-      dateRangeLabel: `Window: ${range.toUpperCase()}`,
+      dateRangeLabel: `Window: ${range.toUpperCase()}${selectedCourseName ? ` · Course: ${selectedCourseName}` : ''}`,
       metrics: [
-        { label: 'Total Students', value: String(s.totalStudents) },
-        { label: 'Catalog Titles', value: String(s.totalBooks) },
-        { label: 'Physical Copies', value: String(s.totalCopies) },
-        { label: 'Issues (Range)', value: String(s.issuesInRange) },
-        { label: 'Overdue Loans', value: String(s.overdueBooks) },
-        { label: 'Fines Collected', value: formatCurrency(s.fineCollected) },
+        { label: 'Total Students', value: String(s.totalStudents ?? 0) },
+        { label: 'Catalog Titles', value: String(s.totalBooks ?? 0) },
+        { label: 'Physical Copies', value: String(s.totalCopies ?? 0) },
+        { label: 'Issues (Range)', value: String(s.issuesInRange ?? 0) },
+        { label: 'Overdue Loans', value: String(s.overdueBooks ?? 0) },
+        { label: 'Fines Collected', value: formatCurrency(s.fineCollected ?? 0) },
       ],
-      rows: data.mostBorrowedBooks.map((b, i) => ({
+      rows: mostBorrowedBooks.map((b, i) => ({
         Rank: i + 1,
         Title: b.title,
         TotalBorrows: b.borrows,
@@ -161,11 +186,12 @@ export function EnterpriseAnalyticsPage() {
   };
 
   if (isLoading) return <SkeletonRows rows={7} />;
-  if (!data) {
+  if (isError || !data?.summary) {
     return (
       <EmptyState
         title="Analytics unavailable"
-        description="Unable to load organization analytics right now."
+        description="Unable to load organization analytics right now. Please try again."
+        action={<Button size="sm" onClick={() => refetch()}>Retry Analytics</Button>}
       />
     );
   }
@@ -180,7 +206,7 @@ export function EnterpriseAnalyticsPage() {
             Enterprise Analytics & Reports
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Real-time PostgreSQL intelligence across circulation, inventory utilization, student engagement, visits, and fine recovery.
+            Real-time Cloud Firestore intelligence across circulation, inventory utilization, student engagement, visits, and fine recovery.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -199,7 +225,7 @@ export function EnterpriseAnalyticsPage() {
         </div>
       </div>
 
-      {/* Date Range Filter Bar */}
+      {/* Date Range & Course Filter Bar */}
       <SurfaceCard className="p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-1.5">
           {[
@@ -224,23 +250,40 @@ export function EnterpriseAnalyticsPage() {
           ))}
         </div>
 
-        {range === 'custom' && (
-          <div className="flex items-center gap-2">
-            <Input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="h-8 w-36 text-xs"
-            />
-            <span className="text-xs text-slate-400">to</span>
-            <Input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="h-8 w-36 text-xs"
-            />
-          </div>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {courses.length > 0 && (
+            <Select
+              value={courseId}
+              onChange={(e) => setCourseId(e.target.value)}
+              className="h-8 w-44 text-xs"
+              aria-label="Filter analytics by course"
+            >
+              <option value="all">All Courses</option>
+              {courses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} {c.code ? `(${c.code})` : ''}
+                </option>
+              ))}
+            </Select>
+          )}
+          {range === 'custom' && (
+            <div className="flex items-center gap-2">
+              <Input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="h-8 w-36 text-xs"
+              />
+              <span className="text-xs text-slate-400">to</span>
+              <Input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="h-8 w-36 text-xs"
+              />
+            </div>
+          )}
+        </div>
       </SurfaceCard>
 
       {/* Top KPI Grid */}
@@ -258,10 +301,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Daily Issue vs Return Trend"
           subtitle="Circulation volume across the selected date window"
-          empty={!data.dailyCirculation.length}
+          empty={!dailyCirculation.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data.dailyCirculation}>
+            <AreaChart data={dailyCirculation}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -276,10 +319,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Monthly Circulation Volume"
           subtitle="All-time monthly borrowing & return performance"
-          empty={!data.monthlyCirculation.length}
+          empty={!monthlyCirculation.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.monthlyCirculation}>
+            <BarChart data={monthlyCirculation}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -297,12 +340,12 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Inventory Status Distribution"
           subtitle="Available vs Issued vs Reserved physical copies"
-          empty={!data.inventoryBreakdown.length}
+          empty={!inventoryBreakdown.length}
         >
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={data.inventoryBreakdown}
+                data={inventoryBreakdown}
                 dataKey="value"
                 nameKey="name"
                 cx="50%"
@@ -311,7 +354,7 @@ export function EnterpriseAnalyticsPage() {
                 outerRadius={82}
                 paddingAngle={3}
               >
-                {data.inventoryBreakdown.map((_, idx) => (
+                {inventoryBreakdown.map((_, idx) => (
                   <Cell key={idx} fill={PIE_COLORS[idx % PIE_COLORS.length]} />
                 ))}
               </Pie>
@@ -324,10 +367,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Course-Wise Student Membership"
           subtitle="Active student distribution across courses"
-          empty={!data.courseWiseMembership.length}
+          empty={!courseWiseMembership.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.courseWiseMembership}>
+            <BarChart data={courseWiseMembership}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="course" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -340,10 +383,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Category-Wise Book Catalog"
           subtitle="Active titles grouped by library category"
-          empty={!data.categoryDistribution.length}
+          empty={!categoryDistribution.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.categoryDistribution}>
+            <BarChart data={categoryDistribution}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="category" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -359,10 +402,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Monthly Student Registrations"
           subtitle="Growth in verified digital library members"
-          empty={!data.monthlyRegistrations.length}
+          empty={!monthlyRegistrations.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data.monthlyRegistrations}>
+            <LineChart data={monthlyRegistrations}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -375,10 +418,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Fine Collection Trends"
           subtitle="Settled fine payments by month"
-          empty={!data.fineCollectionTrends.length}
+          empty={!fineCollectionTrends.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data.fineCollectionTrends}>
+            <AreaChart data={fineCollectionTrends}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} />
@@ -391,10 +434,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Monthly Reading Room Visitors"
           subtitle="Gate QR & manual check-ins per month"
-          empty={!data.monthlyVisitors.length}
+          empty={!monthlyVisitors.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data.monthlyVisitors}>
+            <AreaChart data={monthlyVisitors}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="month" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -407,10 +450,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Peak Visiting Hours"
           subtitle="Hourly attendance distribution across library hours"
-          empty={!data.peakVisitingHours.length}
+          empty={!peakVisitingHours.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.peakVisitingHours}>
+            <BarChart data={peakVisitingHours}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis dataKey="hour" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
@@ -426,10 +469,10 @@ export function EnterpriseAnalyticsPage() {
         <ChartCard
           title="Most Borrowed Books"
           subtitle="Top circulating titles in your catalog"
-          empty={!data.mostBorrowedBooks.length}
+          empty={!mostBorrowedBooks.length}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data.mostBorrowedBooks} layout="vertical" margin={{ left: 20 }}>
+            <BarChart data={mostBorrowedBooks} layout="vertical" margin={{ left: 20 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" opacity={0.4} />
               <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
               <YAxis type="category" dataKey="title" width={140} tick={{ fontSize: 11 }} />
@@ -448,13 +491,13 @@ export function EnterpriseAnalyticsPage() {
               Top readers ranked by total verified circulation records
             </p>
           </div>
-          {!data.mostActiveStudents.length ? (
+          {!mostActiveStudents.length ? (
             <div className="py-10 text-center text-xs text-slate-400">
               No borrowing leaderboards recorded yet.
             </div>
           ) : (
             <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {data.mostActiveStudents.map((stu, idx) => (
+              {mostActiveStudents.map((stu, idx) => (
                 <div key={idx} className="flex items-center justify-between py-2.5 text-xs">
                   <div className="flex items-center gap-3 min-w-0">
                     <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-indigo-50 font-mono font-bold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">

@@ -62,16 +62,29 @@ class AppErrorBoundary extends React.Component<
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               {this.state.message}
             </p>
-            <Button
-              size="sm"
-              onClick={() => {
-                this.setState({ hasError: false, message: '' });
-                window.location.href = '/';
-              }}
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Reload QIVORA
-            </Button>
+            <div className="flex items-center justify-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  queryClient.clear();
+                  this.setState({ hasError: false, message: '' });
+                }}
+              >
+                Try Again
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  queryClient.clear();
+                  this.setState({ hasError: false, message: '' });
+                  window.location.assign('/');
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Reload QIVORA
+              </Button>
+            </div>
           </SurfaceCard>
           <QivoraFooter className="mt-6" />
         </div>

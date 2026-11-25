@@ -47,10 +47,29 @@ export function makeId(prefix = 'id'): string {
   return `${prefix}_${hex}`;
 }
 
-export function makeSecureToken(byteLength = 24): string {
-  const bytes = new Uint8Array(byteLength);
+export function makeSecureToken(length = 16): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = new Uint8Array(Math.max(12, Math.min(length, 32)));
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+}
+
+/**
+ * Extracts a clean compact token/barcode from a full verification URL,
+ * compact QIV: prefix, or raw barcode/roll string so long URLs never break scans.
+ */
+export function extractCompactCode(raw: string | null | undefined): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.includes('/verify/')) {
+    const after = trimmed.split('/verify/').pop() || '';
+    return decodeURIComponent(after.split(/[?#]/)[0] || '').trim();
+  }
+  if (/^qiv(ora)?:/i.test(trimmed)) {
+    const parts = trimmed.split(':');
+    return (parts[parts.length - 1] || '').trim();
+  }
+  return trimmed;
 }
 
 export function normalizeEmail(email: string): string {

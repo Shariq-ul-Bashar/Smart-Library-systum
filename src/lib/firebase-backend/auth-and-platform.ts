@@ -28,6 +28,7 @@ import {
   BackendError,
   BOOTSTRAPPED_OWNER_EMAILS,
   createUserNotification,
+  extractCompactCode,
   generatePolicyCompliantPassword,
   getPlatformPasswordPolicyDoc,
   makeId,
@@ -484,7 +485,7 @@ export async function handleAuthAndPublicRoute(
   // 11. Public QR Verification
   const verifyMatch = pathname.match(/^\/verify\/qr\/([^/]+)$/);
   if (method === 'GET' && verifyMatch) {
-    const token = decodeURIComponent(verifyMatch[1]).trim();
+    const token = extractCompactCode(decodeURIComponent(verifyMatch[1]));
     if (!token || token.length < 8) {
       throw new BackendError('Invalid verification token format.', 404);
     }
@@ -600,14 +601,29 @@ export async function handlePlatformRoute(
     };
   }
 
-  // 2. Organizations CRUD
+  // 2. Organizations CRUD (List, Create + Initial Admin, Edit, Dependencies, Archive/Cascade Delete)
   if (method === 'GET' && pathname === '/platform/organizations') {
-    const orgs = await safeListDocs<Record<string, any>>('organizations');
-    orgs.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    return { handled: true, data: { organizations: orgs } };
+    const [orgs, mems] = await Promise.all([
+      safeListDocs<Record<string, any>>('organizations'),
+      safeListDocs<Record<string, any>>('memberships'),
+    ]);
+    const adminCountByOrg = new Map<string, number>();
+    for (const m of mems) {
+      if (m.roleSlug === 'college_admin' && m.status === 'active') {
+        adminCountByOrg.set(m.organizationId, (adminCountByOrg.get(m.organizationId) || 0) + 1);
+      }
+    }
+    const enriched = orgs
+      .map((o): Record<string, any> => ({
+        ...o,
+        adminCount: adminCountByOrg.get(o.id) || 0,
+      }))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    return { handled: true, data: { organizations: enriched } };
   }
 
   if (method === 'POST' && pathname === '/platform/organizations') {
+    const superCtx = await requireSuperAdminUser();
     const name = String(body?.name || '').trim();
     const code = String(body?.code || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     if (!name || !code) {
@@ -631,15 +647,233 @@ export async function handlePlatformRoute(
       academicSession: body?.academicSession || '2026-2027',
     });
 
+    const ts = nowIso();
+    if (body?.assignSelfAsAdmin) {
+      const selfMemId = `${orgId}_${superCtx.fbUser.uid}_college_admin`;
+      await safeSetDoc(`memberships/${selfMemId}`, {
+        id: selfMemId,
+        userId: superCtx.fbUser.uid,
+        organizationId: orgId,
+        organizationName: name,
+        organizationCode: code,
+        organizationStatus: 'active',
+        roleSlug: 'college_admin',
+        roleName: roleDisplayName('college_admin'),
+        status: 'active',
+        isDefault: false,
+        createdAt: ts,
+        updatedAt: ts,
+      });
+    }
+
+    let initialAdminResult: any = null;
+    if (body?.initialAdmin?.email && body?.initialAdmin?.fullName) {
+      initialAdminResult = await provisionAccountAsSuperAdmin({
+        organizationId: orgId,
+        roleSlug: 'college_admin',
+        fullName: body.initialAdmin.fullName,
+        email: body.initialAdmin.email,
+        phone: body.initialAdmin.phone || null,
+        password: body.initialAdmin.password || undefined,
+        autoGeneratePassword: !body.initialAdmin.password,
+        requirePasswordChange: false,
+      });
+    }
+
     await writePlatformAudit({
       action: 'organization_created',
       entityType: 'organization',
       entityId: orgId,
       organizationId: orgId,
-      details: { name, code },
+      details: { name, code, assignSelfAsAdmin: Boolean(body?.assignSelfAsAdmin), hasInitialAdmin: Boolean(initialAdminResult) },
     });
 
-    return { handled: true, data: { organization: orgDoc } };
+    return { handled: true, data: { organization: orgDoc, initialAdmin: initialAdminResult } };
+  }
+
+  const orgDepsMatch = pathname.match(/^\/platform\/organizations\/([^/]+)\/dependencies$/);
+  if (method === 'GET' && orgDepsMatch) {
+    const orgId = orgDepsMatch[1];
+    const [students, books, copies, loans, mems] = await Promise.all([
+      safeListDocs(`organizations/${orgId}/students`).catch(() => []),
+      safeListDocs(`organizations/${orgId}/books`).catch(() => []),
+      safeListDocs(`organizations/${orgId}/bookCopies`).catch(() => []),
+      safeListDocs(`organizations/${orgId}/loans`).catch(() => []),
+      safeListDocs<Record<string, any>>('memberships').catch(() => []),
+    ]);
+    const orgMemberships = mems.filter((m) => m.organizationId === orgId);
+    const activeLoans = loans.filter((l: any) => l.status !== 'returned').length;
+    return {
+      handled: true,
+      data: {
+        dependencies: {
+          students: students.length,
+          books: books.length,
+          copies: copies.length,
+          loans: loans.length,
+          activeLoans,
+          memberships: orgMemberships.length,
+        },
+      },
+    };
+  }
+
+  const orgSingleMatch = pathname.match(/^\/platform\/organizations\/([^/]+)$/);
+  if (orgSingleMatch && (method === 'PATCH' || method === 'PUT')) {
+    const orgId = orgSingleMatch[1];
+    const org = await safeGetDoc<Record<string, any>>(`organizations/${orgId}`);
+    if (!org) throw new BackendError('Organization not found.', 404);
+
+    const nextName = String(body?.name ?? org.name).trim();
+    const nextCode = String(body?.code ?? org.code).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if (!nextName || !nextCode) {
+      throw new BackendError('Institution name and code cannot be empty.', 400);
+    }
+
+    if (nextCode !== String(org.code || '').toUpperCase()) {
+      const allOrgs = await safeListDocs<Record<string, any>>('organizations');
+      if (allOrgs.some((o) => o.id !== orgId && String(o.code || '').toUpperCase() === nextCode)) {
+        throw new BackendError(`Organization code "${nextCode}" is already used by another institution.`, 409);
+      }
+    }
+
+    const ts = nowIso();
+    const nextBranding = {
+      ...(org.branding || {}),
+      collegeName: nextName,
+      universityName: body?.universityName !== undefined ? body.universityName || null : org.branding?.universityName || null,
+      email: body?.email !== undefined ? body.email || null : org.branding?.email || null,
+      contactNumber: body?.contactNumber !== undefined ? body.contactNumber || null : org.branding?.contactNumber || null,
+      website: body?.website !== undefined ? body.website || null : org.branding?.website || null,
+      address: body?.address !== undefined ? body.address || null : org.branding?.address || null,
+      collegeLogoUrl: body?.logoUrl !== undefined ? body.logoUrl || null : org.branding?.collegeLogoUrl || null,
+    };
+
+    const updates = {
+      name: nextName,
+      code: nextCode,
+      universityName: body?.universityName !== undefined ? body.universityName || null : org.universityName || null,
+      academicSession: body?.academicSession !== undefined ? body.academicSession || '2026-2027' : org.academicSession || '2026-2027',
+      email: body?.email !== undefined ? body.email || null : org.email || null,
+      contactNumber: body?.contactNumber !== undefined ? body.contactNumber || null : org.contactNumber || null,
+      website: body?.website !== undefined ? body.website || null : org.website || null,
+      address: body?.address !== undefined ? body.address || null : org.address || null,
+      logoUrl: body?.logoUrl !== undefined ? body.logoUrl || null : org.logoUrl || null,
+      branding: nextBranding,
+      updatedAt: ts,
+    };
+
+    await safeUpdateDoc(`organizations/${orgId}`, updates);
+    await syncPublicOrganizationDoc({ ...org, ...updates });
+
+    const mems = await safeListDocs<Record<string, any>>('memberships');
+    await Promise.all(
+      mems
+        .filter((m) => m.organizationId === orgId)
+        .map((m) =>
+          safeUpdateDoc(`memberships/${m.id}`, {
+            organizationName: nextName,
+            organizationCode: nextCode,
+            updatedAt: ts,
+          }).catch(() => {})
+        )
+    );
+
+    await writePlatformAudit({
+      action: 'organization_updated',
+      entityType: 'organization',
+      entityId: orgId,
+      organizationId: orgId,
+      details: { name: nextName, code: nextCode },
+    });
+
+    return { handled: true, data: { organization: { ...org, ...updates }, message: 'Organization updated successfully.' } };
+  }
+
+  if (orgSingleMatch && method === 'DELETE') {
+    const orgId = orgSingleMatch[1];
+    const org = await safeGetDoc<Record<string, any>>(`organizations/${orgId}`);
+    if (!org) throw new BackendError('Organization not found.', 404);
+    const mode = String(body?.mode || searchParams.get('mode') || 'archive').toLowerCase();
+    const ts = nowIso();
+
+    if (mode === 'archive') {
+      await safeUpdateDoc(`organizations/${orgId}`, { status: 'suspended', updatedAt: ts });
+      await syncPublicOrganizationDoc({ ...org, status: 'suspended' });
+      const mems = await safeListDocs<Record<string, any>>('memberships');
+      await Promise.all(
+        mems
+          .filter((m) => m.organizationId === orgId)
+          .map((m) => safeUpdateDoc(`memberships/${m.id}`, { organizationStatus: 'suspended', updatedAt: ts }).catch(() => {}))
+      );
+      await writePlatformAudit({
+        action: 'organization_archived',
+        entityType: 'organization',
+        entityId: orgId,
+        organizationId: orgId,
+        details: { name: org.name, code: org.code },
+      });
+      return { handled: true, data: { message: `${org.name} archived (suspended) safely with all records preserved.` } };
+    }
+
+    // Cascade permanent delete of all organization subcollections, memberships, pendingInvites, and public directory doc
+    const subcollections = [
+      'students',
+      'studentApplications',
+      'books',
+      'bookCopies',
+      'loans',
+      'reservations',
+      'fines',
+      'finePayments',
+      'idCards',
+      'idTemplates',
+      'idAssignments',
+      'librarians',
+      'attendance',
+      'migrations',
+      'assets',
+      'auditLogs',
+    ];
+
+    // Revoke/remove public QR records tied to this org's ID cards first
+    const cards = await safeListDocs<Record<string, any>>(`organizations/${orgId}/idCards`).catch(() => []);
+    for (const c of cards) {
+      if (c.qrToken) {
+        await safeDeleteDoc(`publicQrRegistry/${c.qrToken}`).catch(() => {});
+      }
+    }
+
+    for (const sub of subcollections) {
+      const docs = await safeListDocs<Record<string, any>>(`organizations/${orgId}/${sub}`).catch(() => []);
+      for (const d of docs) {
+        await safeDeleteDoc(`organizations/${orgId}/${sub}/${d.id}`).catch(() => {});
+      }
+    }
+
+    const [mems, invites] = await Promise.all([
+      safeListDocs<Record<string, any>>('memberships').catch(() => []),
+      safeListDocs<Record<string, any>>('pendingInvites').catch(() => []),
+    ]);
+    for (const m of mems.filter((x) => x.organizationId === orgId)) {
+      await safeDeleteDoc(`memberships/${m.id}`).catch(() => {});
+    }
+    for (const inv of invites.filter((x) => x.organizationId === orgId)) {
+      await safeDeleteDoc(`pendingInvites/${inv.id}`).catch(() => {});
+    }
+
+    await safeDeleteDoc(`publicOrganizations/${orgId}`).catch(() => {});
+    await safeDeleteDoc(`organizations/${orgId}`);
+
+    await writePlatformAudit({
+      action: 'organization_deleted_cascade',
+      entityType: 'organization',
+      entityId: orgId,
+      organizationId: orgId,
+      details: { name: org.name, code: org.code },
+    });
+
+    return { handled: true, data: { message: `${org.name} and all linked tenant records permanently deleted.` } };
   }
 
   const orgStatusMatch = pathname.match(/^\/platform\/organizations\/([^/]+)\/status$/);
@@ -675,7 +909,7 @@ export async function handlePlatformRoute(
     return { handled: true, data: { students } };
   }
 
-  // 3. College Admins Management
+  // 3. College Admins Management (List, Create, Edit Details/Role/College, Status, Delete)
   if (method === 'GET' && pathname === '/platform/college-admins') {
     const [mems, users] = await Promise.all([
       safeListDocs<Record<string, any>>('memberships'),
@@ -683,31 +917,36 @@ export async function handlePlatformRoute(
     ]);
     const userMap = new Map(users.map((u) => [u.id, u]));
     const rows = mems
-      .filter((m) => m.roleSlug === 'college_admin')
+      .filter((m) => m.roleSlug === 'college_admin' || m.roleSlug === 'librarian')
       .map((m) => {
         const u = userMap.get(m.userId);
         return {
           membershipId: m.id,
+          roleSlug: m.roleSlug,
+          roleName: m.roleName || roleDisplayName(m.roleSlug),
           status: m.status,
           createdAt: m.createdAt,
           organizationId: m.organizationId,
           organizationName: m.organizationName,
           organizationCode: m.organizationCode,
           profileId: m.userId,
-          fullName: u?.fullName || 'College Admin',
+          fullName: u?.fullName || 'Administrator',
           email: u?.email || '',
           phone: u?.phone || null,
           profileStatus: u?.status || 'active',
           lastLoginAt: u?.lastLoginAt || null,
         };
-      });
+      })
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     return { handled: true, data: { collegeAdmins: rows } };
   }
 
   if (method === 'POST' && pathname === '/platform/college-admins') {
+    const targetRole =
+      body?.roleSlug === 'librarian' ? 'librarian' : 'college_admin';
     const res = await provisionAccountAsSuperAdmin({
       organizationId: body?.organizationId,
-      roleSlug: 'college_admin',
+      roleSlug: targetRole,
       fullName: body?.fullName,
       email: body?.email,
       phone: body?.phone,
@@ -715,7 +954,15 @@ export async function handlePlatformRoute(
       autoGeneratePassword: !body?.password,
       requirePasswordChange: false,
     });
-    return { handled: true, data: { membership: res.account, email: res.account.email } };
+    return {
+      handled: true,
+      data: {
+        membership: res.account,
+        email: res.account.email,
+        temporaryPasswordOnce: res.temporaryPasswordOnce,
+        message: res.message,
+      },
+    };
   }
 
   const cAdminStatusMatch = pathname.match(/^\/platform\/college-admins\/([^/]+)\/status$/);
@@ -723,6 +970,87 @@ export async function handlePlatformRoute(
     const status = body?.status === 'suspended' ? 'suspended' : 'active';
     await safeUpdateDoc(`memberships/${cAdminStatusMatch[1]}`, { status, updatedAt: nowIso() });
     return { handled: true, data: { membership: { id: cAdminStatusMatch[1], status } } };
+  }
+
+  const cAdminSingleMatch = pathname.match(/^\/platform\/college-admins\/([^/]+)$/);
+  if (cAdminSingleMatch && (method === 'PATCH' || method === 'PUT')) {
+    const memId = cAdminSingleMatch[1];
+    const existingMem = await safeGetDoc<Record<string, any>>(`memberships/${memId}`);
+    if (!existingMem) throw new BackendError('Administrator assignment not found.', 404);
+
+    const ts = nowIso();
+    const nextOrgId = String(body?.organizationId || existingMem.organizationId).trim();
+    const nextRoleSlug = (
+      ['college_admin', 'librarian', 'student'].includes(String(body?.roleSlug || ''))
+        ? String(body.roleSlug)
+        : existingMem.roleSlug
+    ) as 'college_admin' | 'librarian' | 'student';
+    const targetOrg = await safeGetDoc<Record<string, any>>(`organizations/${nextOrgId}`);
+    if (!targetOrg) throw new BackendError('Target institution not found.', 404);
+
+    // Update user profile details if provided
+    const userUpdates: Record<string, any> = { updatedAt: ts };
+    if (body?.fullName && String(body.fullName).trim()) {
+      userUpdates.fullName = String(body.fullName).trim().slice(0, 120);
+    }
+    if (body?.phone !== undefined) {
+      userUpdates.phone = body.phone ? String(body.phone).trim().slice(0, 40) : null;
+    }
+    if (Object.keys(userUpdates).length > 1) {
+      await safeUpdateDoc(`users/${existingMem.userId}`, userUpdates).catch(() => {});
+    }
+
+    const nextMemId = `${nextOrgId}_${existingMem.userId}_${nextRoleSlug}`;
+    if (nextMemId !== memId) {
+      // Create new canonical membership document and remove old one
+      await safeSetDoc(`memberships/${nextMemId}`, {
+        id: nextMemId,
+        userId: existingMem.userId,
+        organizationId: nextOrgId,
+        organizationName: targetOrg.name,
+        organizationCode: targetOrg.code,
+        organizationStatus: targetOrg.status || 'active',
+        roleSlug: nextRoleSlug,
+        roleName: roleDisplayName(nextRoleSlug),
+        status: existingMem.status || 'active',
+        isDefault: Boolean(existingMem.isDefault),
+        createdAt: existingMem.createdAt || ts,
+        updatedAt: ts,
+      });
+      await safeDeleteDoc(`memberships/${memId}`);
+    } else {
+      await safeUpdateDoc(`memberships/${memId}`, {
+        organizationName: targetOrg.name,
+        organizationCode: targetOrg.code,
+        organizationStatus: targetOrg.status || 'active',
+        updatedAt: ts,
+      });
+    }
+
+    await writePlatformAudit({
+      action: 'college_admin_updated',
+      entityType: 'membership',
+      entityId: nextMemId,
+      organizationId: nextOrgId,
+      details: { previousMembershipId: memId, roleSlug: nextRoleSlug, fullName: body?.fullName || null },
+    });
+
+    return { handled: true, data: { membershipId: nextMemId, message: 'Administrator details and assignment updated.' } };
+  }
+
+  if (cAdminSingleMatch && method === 'DELETE') {
+    const memId = cAdminSingleMatch[1];
+    const existingMem = await safeGetDoc<Record<string, any>>(`memberships/${memId}`);
+    if (!existingMem) throw new BackendError('Administrator assignment not found.', 404);
+    await safeDeleteDoc(`memberships/${memId}`);
+    await writePlatformAudit({
+      action: 'college_admin_removed',
+      entityType: 'membership',
+      entityId: memId,
+      organizationId: existingMem.organizationId,
+      details: { userId: existingMem.userId, roleSlug: existingMem.roleSlug },
+    });
+    return { handled: true, data: { message: 'Administrator role assignment removed.' } };
   }
 
   // 4. Centralized Accounts & Password Management
@@ -944,7 +1272,7 @@ export async function handlePlatformRoute(
       }
 
       const founderId = makeId('fnd');
-      const qrToken = makeSecureToken(24);
+      const qrToken = makeSecureToken(16);
       const founderNumber = `QIV-FND-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const ts = nowIso();
       const editionName = String(body?.editionName || 'QIVORA GOLDEN FOUNDER EDITION').trim();
@@ -1179,7 +1507,7 @@ export async function handlePlatformRoute(
     const fullName = String(body?.fullName || '').trim();
     if (!fullName) throw new BackendError('Full name is required.', 400);
     const founderId = makeId('fnd');
-    const qrToken = makeSecureToken(24);
+    const qrToken = makeSecureToken(16);
     const founderNumber = `QIV-FND-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const ts = nowIso();
     const record = {
@@ -1232,7 +1560,7 @@ export async function handlePlatformRoute(
     if (f.qrToken) {
       await safeUpdateDoc(`publicQrRegistry/${f.qrToken}`, { isActive: false, status: 'revoked', revokedAt: ts, updatedAt: ts }).catch(() => {});
     }
-    const newToken = makeSecureToken(24);
+    const newToken = makeSecureToken(16);
     await safeUpdateDoc(`founderIdentities/${f.id}`, { qrToken: newToken, qrIsActive: true, updatedAt: ts });
     await syncPublicQrRecord({
       token: newToken,
@@ -1378,29 +1706,127 @@ export async function handlePlatformRoute(
     return { handled: true, data: { auditLogs: logs.slice(0, 150) } };
   }
 
+  const DEFAULT_INTEGRATION_MODULES = [
+    {
+      key: 'firebase_auth',
+      displayName: 'Firebase Authentication',
+      category: 'security',
+      description: 'Multi-role Google Sign-In and Email/Password authentication with Firebase Auth.',
+      envVars: ['VITE_FIREBASE_API_KEY', 'VITE_FIREBASE_AUTH_DOMAIN'],
+      publicFallbackAvailable: false,
+      credentialsConfigured: true,
+      missingEnv: [],
+      status: 'configured_enabled',
+      isEnabled: true,
+    },
+    {
+      key: 'cloud_firestore',
+      displayName: 'Cloud Firestore Database',
+      category: 'storage',
+      description: `Tenant-isolated NoSQL database (${firebaseConfig.firestoreDatabaseId}) with RBAC security rules.`,
+      envVars: ['VITE_FIREBASE_PROJECT_ID', 'VITE_FIREBASE_DATABASE_ID'],
+      publicFallbackAvailable: false,
+      credentialsConfigured: true,
+      missingEnv: [],
+      status: 'configured_enabled',
+      isEnabled: true,
+    },
+    {
+      key: 'open_library_isbn',
+      displayName: 'Open Library & Google Books ISBN API',
+      category: 'catalog',
+      description: 'Automatic book title, author, publisher, and cover lookup from scanned ISBN barcodes.',
+      envVars: [],
+      publicFallbackAvailable: true,
+      credentialsConfigured: true,
+      missingEnv: [],
+      status: 'public_api_ready',
+      isEnabled: true,
+    },
+    {
+      key: 'smtp_email',
+      displayName: 'SMTP Email Delivery',
+      category: 'notifications',
+      description: 'Automated due-date and announcement emails (requires external backend mailer; Firebase password resets work natively).',
+      envVars: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'],
+      publicFallbackAvailable: false,
+      credentialsConfigured: false,
+      missingEnv: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'],
+      status: 'not_configured',
+      isEnabled: false,
+    },
+    {
+      key: 'whatsapp_alerts',
+      displayName: 'WhatsApp Business Alerts',
+      category: 'notifications',
+      description: 'Optional WhatsApp Cloud API notifications (not configured on static Firebase deployment).',
+      envVars: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'],
+      publicFallbackAvailable: false,
+      credentialsConfigured: false,
+      missingEnv: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'],
+      status: 'not_configured',
+      isEnabled: false,
+    },
+  ];
+
+  const computeIntegrationStatus = (def: (typeof DEFAULT_INTEGRATION_MODULES)[number], isEnabled: boolean) => {
+    if (!def.credentialsConfigured) {
+      return def.publicFallbackAvailable ? 'public_api_ready' : 'not_configured';
+    }
+    if (!isEnabled) return 'configured_disabled';
+    return def.publicFallbackAvailable ? 'public_api_ready' : 'configured_enabled';
+  };
+
+  const normalizeIntegrationModules = (raw?: any[]) => {
+    const savedByKey = new Map((Array.isArray(raw) ? raw : []).map((m: any) => [m.key, m]));
+    return DEFAULT_INTEGRATION_MODULES.map((def) => {
+      const saved = savedByKey.get(def.key);
+      const isEnabled =
+        saved !== undefined
+          ? Boolean(saved.isEnabled ?? saved.enabled ?? def.isEnabled)
+          : def.isEnabled;
+      const effectiveEnabled = def.credentialsConfigured ? isEnabled : false;
+      return {
+        ...def,
+        isEnabled: effectiveEnabled,
+        status: computeIntegrationStatus(def, effectiveEnabled),
+      };
+    });
+  };
+
   if (method === 'GET' && pathname === '/platform/integrations') {
     const docData = await safeGetDoc<{ value?: { modules?: any[] } }>('platformSettings/integrations').catch(() => null);
-    const defaultModules = [
-      { key: 'firebase_auth', name: 'Firebase Authentication', category: 'Identity', status: 'configured', enabled: true, description: 'Google Sign-In & Email/Password authentication.' },
-      { key: 'cloud_firestore', name: 'Cloud Firestore', category: 'Database', status: 'configured', enabled: true, description: `Multi-tenant NoSQL store (${firebaseConfig.firestoreDatabaseId}).` },
-      { key: 'open_library_isbn', name: 'Open Library & Google Books ISBN API', category: 'Catalog', status: 'configured', enabled: true, description: 'Automatic book metadata lookup from scanned barcodes.' },
-    ];
-    return { handled: true, data: { integrations: docData?.value?.modules || defaultModules } };
+    return {
+      handled: true,
+      data: { integrations: normalizeIntegrationModules(docData?.value?.modules) },
+    };
   }
 
   const intToggleMatch = pathname.match(/^\/platform\/integrations\/([^/]+)$/);
   if ((method === 'PATCH' || method === 'PUT') && intToggleMatch) {
+    const targetKey = intToggleMatch[1];
     const docData = await safeGetDoc<{ value?: { modules?: any[] } }>('platformSettings/integrations').catch(() => null);
-    const modules = (docData?.value?.modules || []).map((m: any) =>
-      m.key === intToggleMatch[1] ? { ...m, enabled: Boolean(body?.enabled) } : m
-    );
+    const current = normalizeIntegrationModules(docData?.value?.modules);
+    const desiredEnabled = Boolean(body?.isEnabled ?? body?.enabled ?? false);
+    const modules = current.map((m) => {
+      if (m.key !== targetKey) return m;
+      if (!m.credentialsConfigured && desiredEnabled) {
+        throw new BackendError(`${m.displayName} is not configured in this Firebase-only deployment.`, 400);
+      }
+      const def = DEFAULT_INTEGRATION_MODULES.find((d) => d.key === m.key) || m;
+      return {
+        ...m,
+        isEnabled: desiredEnabled,
+        status: computeIntegrationStatus(def, desiredEnabled),
+      };
+    });
     await safeSetDoc('platformSettings/integrations', {
       key: 'integrations',
       value: { modules },
       description: 'Platform integration modules',
       updatedAt: nowIso(),
     });
-    return { handled: true, data: { ok: true } };
+    return { handled: true, data: { ok: true, integrations: modules } };
   }
 
   if (method === 'GET' && (pathname === '/platform/health' || pathname === '/platform/database/health')) {
@@ -1477,6 +1903,9 @@ async function provisionAccountAsSuperAdmin(input: any) {
     : String(input.password).trim();
 
   if (!useAuto) {
+    if (plainTempPassword.length < 8) {
+      throw new BackendError('Custom password must be at least 8 characters long.', 400);
+    }
     const check = validatePasswordAgainstPolicy(plainTempPassword, policy);
     if (!check.valid) throw new BackendError(check.error || 'Password does not meet policy.', 400);
   }
@@ -1484,7 +1913,9 @@ async function provisionAccountAsSuperAdmin(input: any) {
   const forceChange =
     input?.requirePasswordChange !== undefined
       ? Boolean(input.requirePasswordChange)
-      : policy.forceChangeOnFirstLogin;
+      : useAuto
+        ? policy.forceChangeOnFirstLogin
+        : false;
 
   const ts = nowIso();
   let targetUid: string | null = null;
@@ -1608,7 +2039,7 @@ async function provisionAccountAsSuperAdmin(input: any) {
     const tpls = await safeListDocs<Record<string, any>>(`organizations/${organizationId}/idTemplates`);
     if (tpls[0]) {
       const cardId = makeId('idc');
-      const qrToken = makeSecureToken(24);
+      const qrToken = makeSecureToken(16);
       const expiresAt = new Date();
       expiresAt.setFullYear(expiresAt.getFullYear() + 1);
       const cardNumber = `ID-${String(org.code || 'ORG').slice(0, 4).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;

@@ -78,7 +78,7 @@ export function NotificationCenterPage() {
   const isAdmin = role === 'college_admin';
   const isStaff = role === 'college_admin' || role === 'librarian';
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['notification-center'],
     queryFn: () =>
       apiRequest<{
@@ -86,7 +86,7 @@ export function NotificationCenterPage() {
         preferences: NotificationPrefs;
         templates: NotificationTemplate[];
         deliveries: DeliveryRow[];
-        providers: {
+        providers?: {
           smtpConfigured: boolean;
           webPushConfigured: boolean;
           whatsappConfigured: boolean;
@@ -166,7 +166,21 @@ export function NotificationCenterPage() {
   });
 
   if (isLoading) return <SkeletonRows rows={6} />;
+  if (isError) {
+    return (
+      <EmptyState
+        title="Notification Center unavailable"
+        description="Unable to load notifications and delivery logs right now."
+        action={<Button size="sm" onClick={() => refetch()}>Retry</Button>}
+      />
+    );
+  }
 
+  const providers = data?.providers ?? {
+    smtpConfigured: false,
+    webPushConfigured: false,
+    whatsappConfigured: false,
+  };
   const items = data?.notifications || [];
   const filtered =
     categoryFilter === 'all' ? items : items.filter((n) => n.type === categoryFilter);
@@ -317,9 +331,9 @@ export function NotificationCenterPage() {
                     Email Notifications
                   </div>
                   <div className="text-xs text-slate-500">
-                    {data?.providers.smtpConfigured
-                      ? 'SMTP provider configured on server.'
-                      : 'Preference saved (requires SMTP credentials in server environment).'}
+                    {providers.smtpConfigured
+                      ? 'SMTP provider configured.'
+                      : 'Preference saved (in-app delivery active; external SMTP relay not configured).'}
                   </div>
                 </div>
               </label>
@@ -334,9 +348,9 @@ export function NotificationCenterPage() {
                 <div>
                   <div className="text-sm font-semibold text-slate-900 dark:text-white">Browser Web Push</div>
                   <div className="text-xs text-slate-500">
-                    {data?.providers.webPushConfigured
-                      ? 'VAPID keys configured on server.'
-                      : 'Preference saved (requires VAPID push keys in server environment).'}
+                    {providers.webPushConfigured
+                      ? 'VAPID keys configured.'
+                      : 'Preference saved (external Web Push VAPID keys not configured).'}
                   </div>
                 </div>
               </label>
@@ -420,21 +434,21 @@ export function NotificationCenterPage() {
                 <div className="text-xs font-semibold text-slate-900 dark:text-white">SMTP Email Relay</div>
                 <div className="text-[11px] text-slate-500">Env: SMTP_HOST, SMTP_USER, SMTP_PASS</div>
               </div>
-              <StatusText status={data?.providers.smtpConfigured ? 'configured_enabled' : 'not_configured'} />
+              <StatusText status={providers.smtpConfigured ? 'configured_enabled' : 'not_configured'} />
             </SurfaceCard>
             <SurfaceCard className="p-4 flex items-center justify-between">
               <div>
                 <div className="text-xs font-semibold text-slate-900 dark:text-white">Web Push (VAPID)</div>
                 <div className="text-[11px] text-slate-500">Env: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY</div>
               </div>
-              <StatusText status={data?.providers.webPushConfigured ? 'configured_enabled' : 'not_configured'} />
+              <StatusText status={providers.webPushConfigured ? 'configured_enabled' : 'not_configured'} />
             </SurfaceCard>
             <SurfaceCard className="p-4 flex items-center justify-between">
               <div>
                 <div className="text-xs font-semibold text-slate-900 dark:text-white">WhatsApp Cloud API</div>
                 <div className="text-[11px] text-slate-500">Env: WHATSAPP_API_TOKEN</div>
               </div>
-              <StatusText status={data?.providers.whatsappConfigured ? 'configured_enabled' : 'not_configured'} />
+              <StatusText status={providers.whatsappConfigured ? 'configured_enabled' : 'not_configured'} />
             </SurfaceCard>
           </div>
 

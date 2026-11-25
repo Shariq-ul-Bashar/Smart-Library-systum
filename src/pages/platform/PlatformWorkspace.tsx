@@ -3,6 +3,7 @@ import { Link, Route, Routes } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
+  Archive,
   Award,
   Building2,
   Check,
@@ -11,11 +12,13 @@ import {
   KeyRound,
   Link2,
   Mail,
+  Pencil,
   Plug,
   Plus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Trash2,
   Unlink,
   UserPlus,
   X,
@@ -50,7 +53,7 @@ import { PlatformStudentTiersPage } from './PlatformStudentTiersPage.tsx';
 
 function PlatformOverview() {
   const { user } = useAuth();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['platform-overview'],
     queryFn: () =>
       apiRequest<{
@@ -58,12 +61,12 @@ function PlatformOverview() {
           totalOrganizations: number;
           activeOrganizations: number;
           suspendedOrganizations: number;
-          pendingOrganizations: number;
+          pendingOrganizations?: number;
           totalCollegeAdmins: number;
           activeFounderIds: number;
-          dbLatencyMs: number;
+          dbLatencyMs?: number;
         };
-        recentOrganizations: Array<{
+        recentOrganizations?: Array<{
           id: string;
           name: string;
           code: string;
@@ -71,9 +74,24 @@ function PlatformOverview() {
           status: string;
           createdAt: string;
         }>;
-        recentActivity: Array<{
+        organizations?: Array<{
           id: string;
-          actorEmail: string;
+          name: string;
+          code: string;
+          universityName?: string;
+          status: string;
+          createdAt: string;
+        }>;
+        recentActivity?: Array<{
+          id: string;
+          actorEmail?: string;
+          action: string;
+          entityType: string;
+          createdAt: string;
+        }>;
+        recentAuditLogs?: Array<{
+          id: string;
+          actorEmail?: string;
           action: string;
           entityType: string;
           createdAt: string;
@@ -82,8 +100,19 @@ function PlatformOverview() {
   });
 
   if (isLoading) return <SkeletonRows rows={6} />;
+  if (isError) {
+    return (
+      <EmptyState
+        title="Unable to load platform overview"
+        description="Please check your connection and try again."
+        action={<Button size="sm" onClick={() => refetch()}>Retry</Button>}
+      />
+    );
+  }
 
   const m = data?.metrics;
+  const recentOrgs = data?.recentOrganizations || data?.organizations || [];
+  const recentLogs = data?.recentActivity || data?.recentAuditLogs || [];
   const activeRatio =
     (m?.totalOrganizations ?? 0) > 0
       ? Math.round(((m?.activeOrganizations ?? 0) / (m?.totalOrganizations ?? 1)) * 100)
@@ -159,14 +188,14 @@ function PlatformOverview() {
             Recent Organization Registrations
           </h2>
           <div className="mt-4">
-            {!data?.recentOrganizations?.length ? (
+            {!recentOrgs.length ? (
               <EmptyState
                 title="No institutions onboarded yet"
                 description="Create your first college or university under Organizations to initialize its isolated database workspace and 9 starter ID templates."
               />
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {data.recentOrganizations.map((org) => (
+                {recentOrgs.slice(0, 8).map((org) => (
                   <div key={org.id} className="flex items-center justify-between py-3 gap-3 text-sm">
                     <div className="min-w-0">
                       <div className="font-medium text-slate-900 dark:text-white truncate">
@@ -195,21 +224,21 @@ function PlatformOverview() {
             Recent Platform Activity
           </h2>
           <div className="mt-4">
-            {!data?.recentActivity?.length ? (
+            {!recentLogs.length ? (
               <EmptyState
                 title="No platform audit events"
                 description="Administrative actions across organizations, College Admins, and Founder IDs appear here automatically."
               />
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {data.recentActivity.slice(0, 8).map((a) => (
+                {recentLogs.slice(0, 8).map((a) => (
                   <div key={a.id} className="py-2.5 flex items-center justify-between gap-3 text-xs">
                     <div className="min-w-0">
                       <span className="font-semibold text-slate-900 dark:text-slate-100">
-                        {a.action.replace(/_/g, ' ')}
+                        {String(a.action || '').replace(/_/g, ' ')}
                       </span>
                       <div className="text-slate-500 dark:text-slate-400 truncate">
-                        {a.actorEmail} · {a.entityType}
+                        {a.actorEmail || 'Super Admin'} · {a.entityType}
                       </div>
                     </div>
                     <span className="font-mono text-slate-400 whitespace-nowrap tabular-nums">
@@ -226,12 +255,44 @@ function PlatformOverview() {
   );
 }
 
+interface PlatformOrgRecord {
+  id: string;
+  name: string;
+  code: string;
+  universityName?: string | null;
+  email?: string | null;
+  contactNumber?: string | null;
+  website?: string | null;
+  address?: string | null;
+  logoUrl?: string | null;
+  academicSession?: string | null;
+  status: string;
+  adminCount: number;
+  createdAt: string;
+}
+
 function PlatformOrganizations() {
   const queryClient = useQueryClient();
   const { refreshSession } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [statusTarget, setStatusTarget] = useState<{ id: string; name: string; nextStatus: string } | null>(null);
+  const [editTarget, setEditTarget] = useState<PlatformOrgRecord | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    code: '',
+    universityName: '',
+    academicSession: '2026-2027',
+    email: '',
+    contactNumber: '',
+    website: '',
+    address: '',
+    logoUrl: '' as string | null,
+  });
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<PlatformOrgRecord | null>(null);
+  const [deleteConfirmCode, setDeleteConfirmCode] = useState('');
+  const [deletingMode, setDeletingMode] = useState<'archive' | 'cascade' | null>(null);
 
   const [form, setForm] = useState({
     name: '',
@@ -251,23 +312,100 @@ function PlatformOrganizations() {
     adminPassword: '',
   });
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['platform-organizations'],
     queryFn: () =>
-      apiRequest<{
-        organizations: Array<{
-          id: string;
-          name: string;
-          code: string;
-          universityName?: string;
-          email?: string;
-          academicSession?: string;
-          status: string;
-          adminCount: number;
-          createdAt: string;
-        }>;
-      }>('/platform/organizations'),
+      apiRequest<{ organizations: PlatformOrgRecord[] }>('/platform/organizations'),
   });
+
+  const { data: depsData, isLoading: depsLoading } = useQuery({
+    queryKey: ['platform-org-deps', deleteTarget?.id],
+    queryFn: () =>
+      apiRequest<{
+        dependencies: {
+          students: number;
+          books: number;
+          copies: number;
+          loans: number;
+          activeLoans: number;
+          memberships: number;
+        };
+      }>(`/platform/organizations/${deleteTarget?.id}/dependencies`),
+    enabled: Boolean(deleteTarget?.id),
+  });
+
+  const openEditModal = (org: PlatformOrgRecord) => {
+    setEditTarget(org);
+    setEditForm({
+      name: org.name || '',
+      code: org.code || '',
+      universityName: org.universityName || '',
+      academicSession: org.academicSession || '2026-2027',
+      email: org.email || '',
+      contactNumber: org.contactNumber || '',
+      website: org.website || '',
+      address: org.address || '',
+      logoUrl: org.logoUrl || null,
+    });
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTarget) return;
+    setSavingEdit(true);
+    try {
+      await apiRequest(`/platform/organizations/${editTarget.id}`, {
+        method: 'PATCH',
+        body: {
+          name: editForm.name,
+          code: editForm.code,
+          universityName: editForm.universityName || null,
+          academicSession: editForm.academicSession || '2026-2027',
+          email: editForm.email || null,
+          contactNumber: editForm.contactNumber || null,
+          website: editForm.website || null,
+          address: editForm.address || null,
+          logoUrl: editForm.logoUrl || null,
+        },
+      });
+      toast.success('Institution updated successfully.');
+      setEditTarget(null);
+      queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-overview'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+      await refreshSession();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to update organization.');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleSafeDelete = async (mode: 'archive' | 'cascade') => {
+    if (!deleteTarget) return;
+    if (mode === 'cascade' && deleteConfirmCode.trim().toUpperCase() !== deleteTarget.code.toUpperCase()) {
+      toast.error(`Type "${deleteTarget.code}" to confirm permanent cascade deletion.`);
+      return;
+    }
+    setDeletingMode(mode);
+    try {
+      const res = await apiRequest<{ message: string }>(
+        `/platform/organizations/${deleteTarget.id}?mode=${mode}`,
+        { method: 'DELETE', body: { mode } }
+      );
+      toast.success(res.message);
+      setDeleteTarget(null);
+      setDeleteConfirmCode('');
+      queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-overview'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+      await refreshSession();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to process organization removal.');
+    } finally {
+      setDeletingMode(null);
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -319,6 +457,7 @@ function PlatformOrganizations() {
       });
       queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
       queryClient.invalidateQueries({ queryKey: ['platform-overview'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
       await refreshSession();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Unable to create organization.');
@@ -351,7 +490,7 @@ function PlatformOrganizations() {
             Registered Colleges & Universities
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Onboard institutions, assign their initial College Admin, and control tenant lifecycle.
+            Onboard, edit, suspend, archive, or safely remove institutions and assign their administrators.
           </p>
         </div>
         <Button onClick={() => setModalOpen(true)}>
@@ -364,6 +503,14 @@ function PlatformOrganizations() {
         {isLoading ? (
           <div className="p-5">
             <SkeletonRows rows={5} />
+          </div>
+        ) : isError ? (
+          <div className="p-6">
+            <EmptyState
+              title="Unable to load institutions"
+              description="Could not fetch registered organizations from Cloud Firestore."
+              action={<Button size="sm" onClick={() => refetch()}>Retry</Button>}
+            />
           </div>
         ) : !data?.organizations?.length ? (
           <div className="p-6">
@@ -404,11 +551,20 @@ function PlatformOrganizations() {
                     <td className="px-4 py-3 font-mono text-xs tabular-nums">
                       {org.academicSession || '—'}
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs tabular-nums">{org.adminCount}</td>
+                    <td className="px-4 py-3 font-mono text-xs tabular-nums">{org.adminCount ?? 0}</td>
                     <td className="px-4 py-3">
                       <StatusText status={org.status} />
                     </td>
-                    <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                    <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => openEditModal(org)}
+                        title="Edit institution"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
                       {org.status !== 'active' ? (
                         <Button
                           size="sm"
@@ -430,17 +586,19 @@ function PlatformOrganizations() {
                           Suspend
                         </Button>
                       )}
-                      {org.status !== 'inactive' && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() =>
-                            setStatusTarget({ id: org.id, name: org.name, nextStatus: 'inactive' })
-                          }
-                        >
-                          Deactivate
-                        </Button>
-                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/40"
+                        onClick={() => {
+                          setDeleteConfirmCode('');
+                          setDeleteTarget(org);
+                        }}
+                        title="Archive or Delete institution"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -564,7 +722,7 @@ function PlatformOrganizations() {
                   onChange={(e) => setForm({ ...form, adminPhone: e.target.value })}
                 />
               </Field>
-              <Field label="Temporary Password" hint="Min 8 chars if creating a new admin.">
+              <Field label="Custom Password" hint="Min 8 chars if creating a new admin.">
                 <Input
                   type="password"
                   value={form.adminPassword}
@@ -594,11 +752,181 @@ function PlatformOrganizations() {
         </form>
       </Modal>
 
+      {/* Edit Organization Modal */}
+      <Modal
+        open={Boolean(editTarget)}
+        onOpenChange={(open) => !open && setEditTarget(null)}
+        title={`Edit ${editTarget?.name || 'Institution'}`}
+        description="Updates institution profile, public registration directory, and synced role memberships."
+        maxWidth="max-w-2xl"
+      >
+        <form onSubmit={handleSaveEdit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="College Name" required>
+              <Input
+                required
+                value={editForm.name}
+                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+              />
+            </Field>
+            <Field label="College Code" required>
+              <Input
+                required
+                value={editForm.code}
+                onChange={(e) => setEditForm({ ...editForm, code: e.target.value.toUpperCase() })}
+              />
+            </Field>
+            <Field label="Affiliated University Name">
+              <Input
+                value={editForm.universityName}
+                onChange={(e) => setEditForm({ ...editForm, universityName: e.target.value })}
+              />
+            </Field>
+            <Field label="Academic Session">
+              <Input
+                value={editForm.academicSession}
+                onChange={(e) => setEditForm({ ...editForm, academicSession: e.target.value })}
+              />
+            </Field>
+            <Field label="Official Email">
+              <Input
+                type="email"
+                value={editForm.email}
+                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+              />
+            </Field>
+            <Field label="Contact Number">
+              <Input
+                value={editForm.contactNumber}
+                onChange={(e) => setEditForm({ ...editForm, contactNumber: e.target.value })}
+              />
+            </Field>
+            <Field label="Website">
+              <Input
+                value={editForm.website}
+                onChange={(e) => setEditForm({ ...editForm, website: e.target.value })}
+              />
+            </Field>
+            <Field label="Campus Address">
+              <Input
+                value={editForm.address}
+                onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+              />
+            </Field>
+            <Field label="College Logo">
+              <FileUploadControl
+                bucket="college_logos"
+                label="Update College Logo"
+                currentUrl={editForm.logoUrl}
+                onUploaded={(url) => setEditForm({ ...editForm, logoUrl: url })}
+                allowClear
+              />
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+            <Button type="button" variant="outline" onClick={() => setEditTarget(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={savingEdit}>
+              Save Changes
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Safe Delete / Archive Organization Modal */}
+      <Modal
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title={`Remove Institution: ${deleteTarget?.name || ''}`}
+        description="Review dependent records before archiving or permanently deleting this institution."
+        maxWidth="max-w-lg"
+      >
+        {deleteTarget && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 p-4">
+              <div className="text-xs font-semibold text-slate-700 dark:text-slate-200 mb-2">
+                Linked Tenant Records (Dependency Check)
+              </div>
+              {depsLoading ? (
+                <div className="text-xs text-slate-500">Checking linked records...</div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div className="rounded-lg bg-white dark:bg-slate-950 p-2.5 border border-slate-200 dark:border-slate-800">
+                    <div className="text-slate-500">Students</div>
+                    <div className="font-mono font-bold text-slate-900 dark:text-white">{depsData?.dependencies.students ?? 0}</div>
+                  </div>
+                  <div className="rounded-lg bg-white dark:bg-slate-950 p-2.5 border border-slate-200 dark:border-slate-800">
+                    <div className="text-slate-500">Books / Copies</div>
+                    <div className="font-mono font-bold text-slate-900 dark:text-white">
+                      {depsData?.dependencies.books ?? 0} / {depsData?.dependencies.copies ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-white dark:bg-slate-950 p-2.5 border border-slate-200 dark:border-slate-800">
+                    <div className="text-slate-500">Active Loans</div>
+                    <div className="font-mono font-bold text-amber-600 dark:text-amber-400">{depsData?.dependencies.activeLoans ?? 0}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/20 p-3.5 text-xs space-y-2">
+              <div className="font-semibold text-amber-900 dark:text-amber-200">
+                Option 1 (Recommended): Archive / Suspend Safely
+              </div>
+              <p className="text-amber-800 dark:text-amber-300">
+                Suspends access for this institution while keeping all students, books, loans, and audit history intact for future restoration.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                loading={deletingMode === 'archive'}
+                disabled={Boolean(deletingMode)}
+                onClick={() => void handleSafeDelete('archive')}
+              >
+                <Archive className="h-3.5 w-3.5" />
+                Archive Institution Safely
+              </Button>
+            </div>
+
+            <div className="rounded-xl border border-red-200 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/20 p-3.5 text-xs space-y-3">
+              <div className="font-semibold text-red-800 dark:text-red-300">
+                Option 2 (Destructive): Permanent Cascade Delete
+              </div>
+              <p className="text-red-700 dark:text-red-300">
+                Permanently deletes this organization, its books, copies, students, loans, memberships, and QR credentials. This cannot be undone.
+              </p>
+              <Field label={`Type "${deleteTarget.code}" to confirm permanent deletion`}>
+                <Input
+                  value={deleteConfirmCode}
+                  onChange={(e) => setDeleteConfirmCode(e.target.value)}
+                  placeholder={deleteTarget.code}
+                  className="font-mono"
+                />
+              </Field>
+              <Button
+                size="sm"
+                variant="danger"
+                loading={deletingMode === 'cascade'}
+                disabled={
+                  Boolean(deletingMode) ||
+                  deleteConfirmCode.trim().toUpperCase() !== deleteTarget.code.toUpperCase()
+                }
+                onClick={() => void handleSafeDelete('cascade')}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Permanently Cascade Delete
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       <ConfirmDialog
         open={Boolean(statusTarget)}
         onOpenChange={(open) => !open && setStatusTarget(null)}
         title={`Change Status for ${statusTarget?.name || ''}`}
-        description={`Are you sure you want to set this institution's status to "${statusTarget?.nextStatus}"? Suspended or inactive institutions cannot be accessed by their staff or students.`}
+        description={`Are you sure you want to set this institution's status to "${statusTarget?.nextStatus}"? Suspended institutions cannot be accessed by their staff or students.`}
         confirmLabel="Update Status"
         danger={statusTarget?.nextStatus !== 'active'}
         onConfirm={confirmStatusChange}
@@ -607,12 +935,42 @@ function PlatformOrganizations() {
   );
 }
 
+interface CollegeAdminRow {
+  membershipId: string;
+  roleSlug: 'college_admin' | 'librarian' | 'student';
+  roleName: string;
+  status: string;
+  organizationId: string;
+  organizationName: string;
+  organizationCode: string;
+  profileId: string;
+  fullName: string;
+  email: string;
+  phone?: string | null;
+  lastLoginAt?: string | null;
+}
+
 function PlatformCollegeAdmins() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [createdPasswordBanner, setCreatedPasswordBanner] = useState<{
+    email: string;
+    password: string;
+  } | null>(null);
+  const [editTarget, setEditTarget] = useState<CollegeAdminRow | null>(null);
+  const [editForm, setEditForm] = useState({
+    fullName: '',
+    phone: '',
+    organizationId: '',
+    roleSlug: 'college_admin' as 'college_admin' | 'librarian',
+  });
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<CollegeAdminRow | null>(null);
+
   const [form, setForm] = useState({
     organizationId: '',
+    roleSlug: 'college_admin' as 'college_admin' | 'librarian',
     fullName: '',
     email: '',
     phone: '',
@@ -627,56 +985,118 @@ function PlatformCollegeAdmins() {
       ),
   });
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['platform-college-admins'],
     queryFn: () =>
-      apiRequest<{
-        collegeAdmins: Array<{
-          membershipId: string;
-          status: string;
-          organizationName: string;
-          organizationCode: string;
-          fullName: string;
-          email: string;
-          phone?: string;
-          lastLoginAt?: string;
-        }>;
-      }>('/platform/college-admins'),
+      apiRequest<{ collegeAdmins: CollegeAdminRow[] }>('/platform/college-admins'),
   });
 
   const handleAssign = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await apiRequest('/platform/college-admins', {
+      const res = await apiRequest<{
+        email?: string;
+        temporaryPasswordOnce?: string;
+        message?: string;
+      }>('/platform/college-admins', {
         method: 'POST',
         body: {
           organizationId: form.organizationId,
+          roleSlug: form.roleSlug,
           fullName: form.fullName,
           email: form.email,
           phone: form.phone || null,
           password: form.password || undefined,
         },
       });
-      toast.success('College Admin assigned successfully.');
+      toast.success(res.message || 'Administrator assigned successfully.');
+      if (res.temporaryPasswordOnce && !res.temporaryPasswordOnce.startsWith('(')) {
+        setCreatedPasswordBanner({
+          email: res.email || form.email,
+          password: res.temporaryPasswordOnce,
+        });
+      }
       setOpen(false);
-      setForm({ organizationId: '', fullName: '', email: '', phone: '', password: '' });
+      setForm({
+        organizationId: '',
+        roleSlug: 'college_admin',
+        fullName: '',
+        email: '',
+        phone: '',
+        password: '',
+      });
       queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Unable to assign College Admin.');
+      toast.error(err instanceof Error ? err.message : 'Unable to assign administrator.');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const toggleStatus = async (membershipId: string, current: string) => {
-    const next = current === 'active' ? 'suspended' : 'active';
-    await apiRequest(`/platform/college-admins/${membershipId}/status`, {
-      method: 'PATCH',
-      body: { status: next },
+  const openEditAdmin = (row: CollegeAdminRow) => {
+    setEditTarget(row);
+    setEditForm({
+      fullName: row.fullName || '',
+      phone: row.phone || '',
+      organizationId: row.organizationId || '',
+      roleSlug: row.roleSlug === 'librarian' ? 'librarian' : 'college_admin',
     });
-    toast.success(`Admin access ${next}.`);
-    queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+  };
+
+  const handleSaveEditAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTarget) return;
+    setSavingEdit(true);
+    try {
+      await apiRequest(`/platform/college-admins/${editTarget.membershipId}`, {
+        method: 'PATCH',
+        body: {
+          fullName: editForm.fullName,
+          phone: editForm.phone || null,
+          organizationId: editForm.organizationId,
+          roleSlug: editForm.roleSlug,
+        },
+      });
+      toast.success('Administrator details and assignment updated.');
+      setEditTarget(null);
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to update administrator.');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const confirmDeleteAdmin = async () => {
+    if (!deleteTarget) return;
+    try {
+      await apiRequest(`/platform/college-admins/${deleteTarget.membershipId}`, {
+        method: 'DELETE',
+      });
+      toast.success(`Removed ${deleteTarget.fullName} from ${deleteTarget.organizationName}.`);
+      setDeleteTarget(null);
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+      queryClient.invalidateQueries({ queryKey: ['platform-organizations'] });
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to remove administrator.');
+    }
+  };
+
+  const toggleStatus = async (membershipId: string, current: string) => {
+    try {
+      const next = current === 'active' ? 'suspended' : 'active';
+      await apiRequest(`/platform/college-admins/${membershipId}/status`, {
+        method: 'PATCH',
+        body: { status: next },
+      });
+      toast.success(`Admin access ${next}.`);
+      queryClient.invalidateQueries({ queryKey: ['platform-college-admins'] });
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to change status.');
+    }
   };
 
   return (
@@ -684,28 +1104,54 @@ function PlatformCollegeAdmins() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-white">
-            College Admin Accounts
+            College Admin & Staff Accounts
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Provision and govern institution-scoped administrators across registered colleges.
+            Provision, edit details/roles/colleges, suspend, or remove institution-scoped administrators.
           </p>
         </div>
         <Button onClick={() => setOpen(true)}>
           <UserPlus className="h-4 w-4" />
-          Assign College Admin
+          Assign Administrator
         </Button>
       </div>
+
+      {createdPasswordBanner && (
+        <SurfaceCard className="p-4 border-emerald-200 bg-emerald-50/70 dark:border-emerald-900/60 dark:bg-emerald-950/30 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs space-y-0.5">
+            <div className="font-semibold text-emerald-800 dark:text-emerald-300">
+              One-Time Credentials Created for {createdPasswordBanner.email}
+            </div>
+            <div className="text-slate-700 dark:text-slate-300">
+              Password:{' '}
+              <span className="font-mono font-bold select-all">{createdPasswordBanner.password}</span>{' '}
+              (Copy now — never stored in plaintext)
+            </div>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => setCreatedPasswordBanner(null)}>
+            Dismiss
+          </Button>
+        </SurfaceCard>
+      )}
 
       <SurfaceCard className="overflow-hidden">
         {isLoading ? (
           <div className="p-5">
             <SkeletonRows rows={4} />
           </div>
+        ) : isError ? (
+          <div className="p-6">
+            <EmptyState
+              title="Unable to load administrators"
+              description="Could not load institution administrator assignments."
+              action={<Button size="sm" onClick={() => refetch()}>Retry</Button>}
+            />
+          </div>
         ) : !data?.collegeAdmins?.length ? (
           <div className="p-6">
             <EmptyState
               title="No College Admins assigned"
-              description="Assign a College Admin to an onboarded institution so they can manage students, librarians, books, and Digital IDs."
+              description="Assign a College Admin or Librarian to an onboarded institution so they can manage students, books, and Digital IDs."
             />
           </div>
         ) : (
@@ -714,10 +1160,11 @@ function PlatformCollegeAdmins() {
               <thead className="border-b border-slate-200 bg-slate-50/80 text-xs font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300">
                 <tr>
                   <th className="px-4 py-3">Administrator</th>
+                  <th className="px-4 py-3">Role</th>
                   <th className="px-4 py-3">Institution</th>
                   <th className="px-4 py-3">Last Sign-In</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-right">Action</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -725,7 +1172,15 @@ function PlatformCollegeAdmins() {
                   <tr key={a.membershipId}>
                     <td className="px-4 py-3">
                       <div className="font-medium text-slate-900 dark:text-white">{a.fullName}</div>
-                      <div className="text-xs text-slate-500">{a.email}</div>
+                      <div className="text-xs text-slate-500">
+                        {a.email}
+                        {a.phone ? ` · ${a.phone}` : ''}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs">
+                      <span className="inline-flex rounded-md bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                        {a.roleName || (a.roleSlug === 'librarian' ? 'Librarian' : 'College Admin')}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-xs">
                       <div className="font-medium">{a.organizationName}</div>
@@ -737,13 +1192,26 @@ function PlatformCollegeAdmins() {
                     <td className="px-4 py-3">
                       <StatusText status={a.status} />
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                      <Button size="sm" variant="ghost" onClick={() => openEditAdmin(a)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => toggleStatus(a.membershipId, a.status)}
                       >
                         {a.status === 'active' ? 'Suspend' : 'Reactivate'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/40"
+                        onClick={() => setDeleteTarget(a)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Remove
                       </Button>
                     </td>
                   </tr>
@@ -754,22 +1222,36 @@ function PlatformCollegeAdmins() {
         )}
       </SurfaceCard>
 
-      <Modal open={open} onOpenChange={setOpen} title="Assign College Admin" maxWidth="max-w-lg">
+      <Modal open={open} onOpenChange={setOpen} title="Assign Institution Administrator" maxWidth="max-w-lg">
         <form onSubmit={handleAssign} className="space-y-4">
-          <Field label="Institution" required>
-            <Select
-              required
-              value={form.organizationId}
-              onChange={(e) => setForm({ ...form, organizationId: e.target.value })}
-            >
-              <option value="">Select institution...</option>
-              {(orgsData?.organizations || []).map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name} ({o.code})
-                </option>
-              ))}
-            </Select>
-          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Institution" required>
+              <Select
+                required
+                value={form.organizationId}
+                onChange={(e) => setForm({ ...form, organizationId: e.target.value })}
+              >
+                <option value="">Select institution...</option>
+                {(orgsData?.organizations || []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name} ({o.code})
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Assigned Role" required>
+              <Select
+                required
+                value={form.roleSlug}
+                onChange={(e) =>
+                  setForm({ ...form, roleSlug: e.target.value as 'college_admin' | 'librarian' })
+                }
+              >
+                <option value="college_admin">College Admin</option>
+                <option value="librarian">Librarian</option>
+              </Select>
+            </Field>
+          </div>
           <Field label="Full Name" required>
             <Input
               required
@@ -788,11 +1270,15 @@ function PlatformCollegeAdmins() {
           <Field label="Phone">
             <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
           </Field>
-          <Field label="Password" hint="Required if creating a new account (min 8 chars).">
+          <Field
+            label="Custom Password (Optional)"
+            hint="Leave blank to auto-generate a secure one-time password, or enter a custom password (min 8 chars)."
+          >
             <Input
               type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
+              placeholder="Leave blank to auto-generate"
             />
           </Field>
           <div className="flex justify-end gap-2 pt-2">
@@ -800,11 +1286,80 @@ function PlatformCollegeAdmins() {
               Cancel
             </Button>
             <Button type="submit" loading={submitting}>
-              Assign Admin
+              Assign Administrator
             </Button>
           </div>
         </form>
       </Modal>
+
+      <Modal
+        open={Boolean(editTarget)}
+        onOpenChange={(isOpen) => !isOpen && setEditTarget(null)}
+        title={`Edit Administrator: ${editTarget?.fullName || ''}`}
+        description="Update administrator name, phone, role, or reassigned institution."
+        maxWidth="max-w-lg"
+      >
+        <form onSubmit={handleSaveEditAdmin} className="space-y-4">
+          <Field label="Full Name" required>
+            <Input
+              required
+              value={editForm.fullName}
+              onChange={(e) => setEditForm({ ...editForm, fullName: e.target.value })}
+            />
+          </Field>
+          <Field label="Phone">
+            <Input
+              value={editForm.phone}
+              onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+            />
+          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Assigned College" required>
+              <Select
+                required
+                value={editForm.organizationId}
+                onChange={(e) => setEditForm({ ...editForm, organizationId: e.target.value })}
+              >
+                {(orgsData?.organizations || []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name} ({o.code})
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Role" required>
+              <Select
+                required
+                value={editForm.roleSlug}
+                onChange={(e) =>
+                  setEditForm({ ...editForm, roleSlug: e.target.value as 'college_admin' | 'librarian' })
+                }
+              >
+                <option value="college_admin">College Admin</option>
+                <option value="librarian">Librarian</option>
+              </Select>
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={() => setEditTarget(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={savingEdit}>
+              Save Changes
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(isOpen) => !isOpen && setDeleteTarget(null)}
+        title={`Remove ${deleteTarget?.fullName || 'Administrator'}?`}
+        description={`This revokes ${deleteTarget?.fullName}'s ${deleteTarget?.roleName || 'admin'} assignment for ${deleteTarget?.organizationName}. Their user profile remains preserved.`}
+        confirmLabel="Remove Role"
+        danger
+        onConfirm={confirmDeleteAdmin}
+      />
     </div>
   );
 }

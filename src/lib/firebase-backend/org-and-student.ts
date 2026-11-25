@@ -4,6 +4,7 @@ import { formatFirebaseAuthError, withSecondaryAuth } from '../firebase.ts';
 import {
   BackendError,
   createUserNotification,
+  extractCompactCode,
   fetchIsbnMetadataFromPublicApis,
   generatePolicyCompliantPassword,
   getPlatformPasswordPolicyDoc,
@@ -37,7 +38,7 @@ async function issueStudentIdCard(org: Record<string, any>, student: Record<stri
 
   const ts = nowIso();
   const cardId = makeId('idc');
-  const qrToken = makeSecureToken(24);
+  const qrToken = makeSecureToken(16);
   const validityMonths = Number(org.settings?.idValidityMonths || 12);
   const expiresAt = new Date();
   expiresAt.setMonth(expiresAt.getMonth() + validityMonths);
@@ -130,6 +131,9 @@ async function listOrgBooksWithAvailability(orgId: string, includeArchived = tru
       const activeCopies = bCopies.filter((c) => c.status !== 'archived');
       const availableCopies = activeCopies.filter((c) => c.status === 'available').length;
       const issuedCopies = activeCopies.filter((c) => c.status === 'issued').length;
+      const reservedCopies = activeCopies.filter((c) => c.status === 'reserved').length;
+      const damagedCopies = activeCopies.filter((c) => c.status === 'damaged').length;
+      const lostCopies = activeCopies.filter((c) => c.status === 'lost').length;
       return {
         ...b,
         categoryName: b.categoryName || catMap.get(b.categoryId) || null,
@@ -138,6 +142,14 @@ async function listOrgBooksWithAvailability(orgId: string, includeArchived = tru
         totalCopies: activeCopies.length,
         availableCopies,
         issuedCopies,
+        inventory: {
+          total: activeCopies.length,
+          available: availableCopies,
+          issued: issuedCopies,
+          reserved: reservedCopies,
+          damaged: damagedCopies,
+          lost: lostCopies,
+        },
         copies: bCopies,
       };
     })
@@ -300,7 +312,7 @@ export async function handleOrgAndStudentRoute(
 
   if (pathname === '/org/overview' && method === 'GET') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const [org, students, apps, books, copies, loans, reservations, fines, attendance] = await Promise.all([
+    const [org, students, apps, books, copies, loans, reservations, fines, payments, attendance] = await Promise.all([
       loadOrg(ctx.orgId),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/studentApplications`),
@@ -309,19 +321,51 @@ export async function handleOrgAndStudentRoute(
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/reservations`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/fines`),
+      safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/finePayments`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/attendance`),
     ]);
 
     const now = new Date();
     const todayPrefix = now.toISOString().slice(0, 10);
+    const localTodayPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const isToday = (iso?: string | null) => {
+      if (!iso) return false;
+      const s = String(iso);
+      return s.startsWith(todayPrefix) || s.startsWith(localTodayPrefix);
+    };
+
+    const activeBooks = books.filter((b) => b.status !== 'archived');
+    const activeCopies = copies.filter((c) => c.status !== 'archived');
+    const availableCopies = activeCopies.filter((c) => c.status === 'available').length;
+    const issuedCopies = activeCopies.filter((c) => c.status === 'issued').length;
     const activeLoans = loans.filter((l) => l.status !== 'returned');
     const overdueLoans = activeLoans.filter((l) => new Date(l.dueAt) < now);
+    const fineGenerated = fines.reduce((sum, f) => sum + Number(f.amount || 0), 0);
+    const fineCollectedFromPayments = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const fineCollectedFromFines = fines.reduce((sum, f) => sum + Number(f.paidAmount || 0), 0);
+    const fineCollected = Math.max(fineCollectedFromPayments, fineCollectedFromFines);
     const unpaidFines = fines.reduce(
       (sum, f) => sum + Math.max(0, Number(f.amount || 0) - Number(f.paidAmount || 0) - Number(f.waivedAmount || 0)),
       0
     );
     const bookMap = new Map(books.map((b) => [b.id, b]));
+    const copyMap = new Map(copies.map((c) => [c.id, c]));
     const studentMap = new Map(students.map((s) => [s.id, s]));
+
+    const recentTransactions = loans
+      .sort((a, b) => String(b.issuedAt || b.createdAt || '').localeCompare(String(a.issuedAt || a.createdAt || '')))
+      .slice(0, 10)
+      .map((l) => ({
+        ...l,
+        bookTitle: bookMap.get(l.bookId)?.title || 'Book',
+        barcode: copyMap.get(l.bookCopyId)?.barcode || l.barcode || '',
+        studentName: studentMap.get(l.studentId)?.fullName || 'Student',
+        studentRoll: studentMap.get(l.studentId)?.collegeRollNumber || '',
+      }));
+
+    const todayVisitors = attendance.filter((a) => isToday(a.checkInAt)).length;
+    const todayIssued = loans.filter((l) => isToday(l.issuedAt)).length;
+    const todayReturned = loans.filter((l) => isToday(l.returnedAt)).length;
 
     return {
       handled: true,
@@ -337,27 +381,30 @@ export async function handleOrgAndStudentRoute(
           totalStudents: students.length,
           activeStudents: students.filter((s) => s.status === 'active').length,
           pendingApplications: apps.filter((a) => a.status === 'pending').length,
-          totalBooks: books.filter((b) => b.status === 'active').length,
-          totalCopies: copies.filter((c) => c.status !== 'archived').length,
-          availableCopies: copies.filter((c) => c.status === 'available').length,
+          totalBookTitles: activeBooks.length,
+          totalPhysicalCopies: activeCopies.length,
+          totalBooks: activeBooks.length,
+          totalCopies: activeCopies.length,
+          availableCopies,
+          issuedCopies,
           activeLoans: activeLoans.length,
+          overdueBooks: overdueLoans.length,
           overdueLoans: overdueLoans.length,
           activeReservations: reservations.filter((r) => ['queued', 'ready'].includes(r.status)).length,
+          todayVisitors,
+          todayCheckIns: todayVisitors,
+          todayIssued,
+          todayReturned,
+          fineGenerated: Number(fineGenerated.toFixed(2)),
+          fineCollected: Number(fineCollected.toFixed(2)),
           unpaidFines: Number(unpaidFines.toFixed(2)),
-          todayCheckIns: attendance.filter((a) => String(a.checkInAt || '').startsWith(todayPrefix)).length,
         },
-        recentLoans: loans
-          .sort((a, b) => String(b.issuedAt || '').localeCompare(String(a.issuedAt || '')))
-          .slice(0, 10)
-          .map((l) => ({
-            ...l,
-            bookTitle: bookMap.get(l.bookId)?.title || 'Book',
-            studentName: studentMap.get(l.studentId)?.fullName || 'Student',
-            studentRoll: studentMap.get(l.studentId)?.collegeRollNumber || '',
-          })),
+        recentTransactions,
+        recentLoans: recentTransactions,
         overdueList: overdueLoans.slice(0, 10).map((l) => ({
           ...l,
           bookTitle: bookMap.get(l.bookId)?.title || 'Book',
+          barcode: copyMap.get(l.bookCopyId)?.barcode || '',
           studentName: studentMap.get(l.studentId)?.fullName || 'Student',
           studentRoll: studentMap.get(l.studentId)?.collegeRollNumber || '',
         })),
@@ -592,7 +639,7 @@ export async function handleOrgAndStudentRoute(
 
   if ((pathname === '/org/reports' || pathname === '/org/analytics/enterprise') && method === 'GET') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const [org, students, books, copies, loans, fines, payments, attendance] = await Promise.all([
+    const [org, allStudents, books, copies, allLoans, allFines, allPayments, allAttendance] = await Promise.all([
       loadOrg(ctx.orgId),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/books`),
@@ -604,52 +651,322 @@ export async function handleOrgAndStudentRoute(
     ]);
 
     const now = new Date();
+    const rangeParam = (searchParams.get('range') || '30d').toLowerCase();
+    const fromParam = searchParams.get('from');
+    const toParam = searchParams.get('to');
+    const courseFilter = (searchParams.get('courseId') || '').trim();
+
+    let startDate = new Date(now);
+    let endDate = new Date(now);
+    endDate.setHours(23, 59, 59, 999);
+
+    if (rangeParam === 'custom' && fromParam && toParam) {
+      const parsedFrom = new Date(`${fromParam}T00:00:00`);
+      const parsedTo = new Date(`${toParam}T23:59:59.999`);
+      if (!Number.isNaN(parsedFrom.getTime())) startDate = parsedFrom;
+      if (!Number.isNaN(parsedTo.getTime())) endDate = parsedTo;
+    } else if (rangeParam === '7d') {
+      startDate.setDate(startDate.getDate() - 6);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (rangeParam === '90d') {
+      startDate.setDate(startDate.getDate() - 89);
+      startDate.setHours(0, 0, 0, 0);
+    } else if (rangeParam === 'year') {
+      startDate.setMonth(startDate.getMonth() - 11, 1);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      startDate.setDate(startDate.getDate() - 29);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    const inRange = (iso?: string | null) => {
+      if (!iso) return false;
+      const d = new Date(iso);
+      return !Number.isNaN(d.getTime()) && d >= startDate && d <= endDate;
+    };
+
+    // Course-wise filtering across students, loans, fines, payments, and attendance
+    const students = courseFilter
+      ? allStudents.filter((s) => s.courseId === courseFilter)
+      : allStudents;
+    const allowedStudentIds = new Set(students.map((s) => s.id));
+    const loans = courseFilter ? allLoans.filter((l) => allowedStudentIds.has(l.studentId)) : allLoans;
+    const fines = courseFilter ? allFines.filter((f) => allowedStudentIds.has(f.studentId)) : allFines;
+    const fineIdSet = new Set(fines.map((f) => f.id));
+    const payments = courseFilter
+      ? allPayments.filter((p) => (p.studentId ? allowedStudentIds.has(p.studentId) : fineIdSet.has(p.fineId)))
+      : allPayments;
+    const attendance = courseFilter
+      ? allAttendance.filter((a) => allowedStudentIds.has(a.studentId))
+      : allAttendance;
+
+    const activeBooks = books.filter((b) => b.status !== 'archived');
+    const activeCopies = copies.filter((c) => c.status !== 'archived');
     const activeLoans = loans.filter((l) => l.status !== 'returned');
     const overdueLoans = activeLoans.filter((l) => new Date(l.dueAt) < now);
-    const totalCollected = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+
+    const issuesInRangeList = loans.filter((l) => inRange(l.issuedAt || l.createdAt));
+    const returnsInRangeList = loans.filter((l) => l.status === 'returned' && inRange(l.returnedAt));
+    const visitsInRangeList = attendance.filter((a) => inRange(a.checkInAt || a.createdAt));
+    const finesInRangeList = fines.filter((f) => inRange(f.createdAt));
+    const paymentsInRangeList = payments.filter((p) => inRange(p.paidAt || p.createdAt));
+
+    const fineGenerated = finesInRangeList.reduce((s, f) => s + Number(f.amount || 0), 0);
+    const fineCollectedPayments = paymentsInRangeList.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const fineCollectedFines = finesInRangeList.reduce((s, f) => s + Number(f.paidAmount || 0), 0);
+    const fineCollected = Math.max(fineCollectedPayments, fineCollectedFines);
     const totalPending = fines.reduce(
       (s, f) => s + Math.max(0, Number(f.amount || 0) - Number(f.paidAmount || 0) - Number(f.waivedAmount || 0)),
       0
     );
 
+    const fmtDayKey = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const fmtMonthKey = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const fmtMonthLabel = (ym: string) => {
+      const [y, m] = ym.split('-').map(Number);
+      return new Date(y, (m || 1) - 1, 1).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+    };
+
+    // 1. Daily Circulation (up to 31 days within selected range)
+    const dailyMap = new Map<string, { issued: number; returned: number; overdue: number }>();
+    const totalDaysSpan = Math.min(
+      62,
+      Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1)
+    );
+    for (let i = 0; i < totalDaysSpan; i++) {
+      const d = new Date(startDate);
+      d.setDate(startDate.getDate() + i);
+      if (d > endDate) break;
+      dailyMap.set(fmtDayKey(d), { issued: 0, returned: 0, overdue: 0 });
+    }
+    for (const l of issuesInRangeList) {
+      const k = fmtDayKey(new Date(l.issuedAt || l.createdAt));
+      const b = dailyMap.get(k);
+      if (b) {
+        b.issued++;
+        if (l.status !== 'returned' && new Date(l.dueAt) < now) b.overdue++;
+      }
+    }
+    for (const l of returnsInRangeList) {
+      const k = fmtDayKey(new Date(l.returnedAt));
+      const b = dailyMap.get(k);
+      if (b) b.returned++;
+    }
+    const dailyCirculation = Array.from(dailyMap.entries()).map(([dateKey, v]) => ({
+      date: dateKey.slice(5),
+      issued: v.issued,
+      returned: v.returned,
+      overdue: v.overdue,
+    }));
+
+    // Build last 6–12 month buckets covering range
+    const monthKeys: string[] = [];
+    const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    const minMonthsStart = new Date(endDate.getFullYear(), endDate.getMonth() - 5, 1);
+    const monthStart = cursor < minMonthsStart ? cursor : minMonthsStart;
+    const iter = new Date(monthStart);
+    while (iter <= endDate && monthKeys.length < 13) {
+      monthKeys.push(fmtMonthKey(iter));
+      iter.setMonth(iter.getMonth() + 1);
+    }
+
+    // 2. Monthly Circulation
+    const monthlyCircMap = new Map(monthKeys.map((k) => [k, { issued: 0, returned: 0 }]));
+    for (const l of loans) {
+      const ik = l.issuedAt ? fmtMonthKey(new Date(l.issuedAt)) : '';
+      if (monthlyCircMap.has(ik)) monthlyCircMap.get(ik)!.issued++;
+      const rk = l.returnedAt ? fmtMonthKey(new Date(l.returnedAt)) : '';
+      if (monthlyCircMap.has(rk)) monthlyCircMap.get(rk)!.returned++;
+    }
+    const monthlyCirculation = monthKeys.map((k) => ({
+      month: fmtMonthLabel(k),
+      issued: monthlyCircMap.get(k)?.issued || 0,
+      returned: monthlyCircMap.get(k)?.returned || 0,
+    }));
+
+    // 3. Monthly Student Registrations
+    const regMap = new Map(monthKeys.map((k) => [k, 0]));
+    for (const s of students) {
+      const mk = s.createdAt ? fmtMonthKey(new Date(s.createdAt)) : '';
+      if (regMap.has(mk)) regMap.set(mk, (regMap.get(mk) || 0) + 1);
+    }
+    const monthlyRegistrations = monthKeys.map((k) => ({
+      month: fmtMonthLabel(k),
+      registrations: regMap.get(k) || 0,
+      count: regMap.get(k) || 0,
+    }));
+
+    // 4. Course-Wise Membership
+    const coursesList: Array<{ id: string; name: string; code: string }> = (org.courses || []).map((c: any) => ({
+      id: String(c.id),
+      name: String(c.name || ''),
+      code: String(c.code || c.name || ''),
+    }));
+    const courseLookup = new Map<string, { id: string; name: string; code: string }>(
+      coursesList.map((c) => [c.id, c])
+    );
+    const courseCounts = new Map<string, { course: string; code: string; count: number }>();
+    for (const s of allStudents) {
+      const c = courseLookup.get(s.courseId);
+      const key = c?.id || 'unassigned';
+      const entry = courseCounts.get(key) || {
+        course: c?.name || 'Unassigned',
+        code: c?.code || 'GEN',
+        count: 0,
+      };
+      entry.count++;
+      courseCounts.set(key, entry);
+    }
+    const courseWiseMembership = Array.from(courseCounts.values()).sort((a, b) => b.count - a.count);
+
+    // 5. Category Distribution
     const catMap = new Map((org.categories || []).map((c: any) => [c.id, c.name]));
     const catCounts = new Map<string, number>();
-    for (const b of books) {
+    for (const b of activeBooks) {
       const name = String(b.categoryName || catMap.get(b.categoryId) || 'General');
       catCounts.set(name, (catCounts.get(name) || 0) + 1);
     }
+    const categoryDistribution = Array.from(catCounts.entries())
+      .map(([category, count]) => ({ category, count, name: category, value: count }))
+      .sort((a, b) => b.count - a.count);
 
+    // 6. Inventory Breakdown
+    const invStatusCounts = new Map<string, number>();
+    for (const c of activeCopies) {
+      const st = String(c.status || 'available');
+      invStatusCounts.set(st, (invStatusCounts.get(st) || 0) + 1);
+    }
+    const inventoryBreakdown = Array.from(invStatusCounts.entries()).map(([status, count]) => ({
+      name: status.charAt(0).toUpperCase() + status.slice(1),
+      value: count,
+      status: status.charAt(0).toUpperCase() + status.slice(1),
+      count,
+    }));
+
+    // 7. Monthly Visitors
+    const visMap = new Map(monthKeys.map((k) => [k, 0]));
+    for (const a of attendance) {
+      const mk = a.checkInAt ? fmtMonthKey(new Date(a.checkInAt)) : '';
+      if (visMap.has(mk)) visMap.set(mk, (visMap.get(mk) || 0) + 1);
+    }
+    const monthlyVisitors = monthKeys.map((k) => ({
+      month: fmtMonthLabel(k),
+      visits: visMap.get(k) || 0,
+    }));
+
+    // 8. Peak Visiting Hours (8 AM – 8 PM)
+    const hourBuckets = new Map<number, number>();
+    for (let h = 8; h <= 20; h++) hourBuckets.set(h, 0);
+    for (const a of visitsInRangeList) {
+      if (!a.checkInAt) continue;
+      const h = new Date(a.checkInAt).getHours();
+      if (hourBuckets.has(h)) hourBuckets.set(h, (hourBuckets.get(h) || 0) + 1);
+    }
+    const peakVisitingHours = Array.from(hourBuckets.entries()).map(([h, visits]) => ({
+      hour: `${h > 12 ? h - 12 : h}${h >= 12 ? ' PM' : ' AM'}`,
+      visits,
+    }));
+
+    // 9. Fine Collection Trends
+    const fineTrendMap = new Map(monthKeys.map((k) => [k, { generated: 0, collected: 0 }]));
+    for (const f of fines) {
+      const mk = f.createdAt ? fmtMonthKey(new Date(f.createdAt)) : '';
+      if (fineTrendMap.has(mk)) {
+        fineTrendMap.get(mk)!.generated += Number(f.amount || 0);
+        fineTrendMap.get(mk)!.collected += Number(f.paidAmount || 0);
+      }
+    }
+    const fineCollectionTrends = monthKeys.map((k) => ({
+      month: fmtMonthLabel(k),
+      generated: Number((fineTrendMap.get(k)?.generated || 0).toFixed(2)),
+      collected: Number((fineTrendMap.get(k)?.collected || 0).toFixed(2)),
+    }));
+
+    // 10. Most Borrowed Books (within selected date range + course filter)
     const loanCountByBook = new Map<string, number>();
-    for (const l of loans) {
+    for (const l of issuesInRangeList) {
       loanCountByBook.set(l.bookId, (loanCountByBook.get(l.bookId) || 0) + 1);
     }
-    const topBooks = books
-      .map((b) => ({ id: b.id, title: b.title, isbn: b.isbn, borrowCount: loanCountByBook.get(b.id) || 0 }))
-      .sort((a, b) => b.borrowCount - a.borrowCount)
+    const mostBorrowedBooks = activeBooks
+      .map((b) => ({
+        bookId: b.id,
+        title: b.title,
+        isbn: b.isbn || '—',
+        borrows: loanCountByBook.get(b.id) || 0,
+        borrowCount: loanCountByBook.get(b.id) || 0,
+      }))
+      .filter((b) => b.borrows > 0)
+      .sort((a, b) => b.borrows - a.borrows)
+      .slice(0, 10);
+
+    // 11. Most Active Students
+    const loansByStudent = new Map<string, number>();
+    for (const l of issuesInRangeList) {
+      loansByStudent.set(l.studentId, (loansByStudent.get(l.studentId) || 0) + 1);
+    }
+    const visitsByStudent = new Map<string, number>();
+    for (const a of visitsInRangeList) {
+      visitsByStudent.set(a.studentId, (visitsByStudent.get(a.studentId) || 0) + 1);
+    }
+    const mostActiveStudents = students
+      .map((s) => ({
+        studentId: s.id,
+        name: s.fullName,
+        fullName: s.fullName,
+        rollNumber: s.collegeRollNumber,
+        borrows: loansByStudent.get(s.id) || 0,
+        loans: loansByStudent.get(s.id) || 0,
+        visits: visitsByStudent.get(s.id) || 0,
+        totalActivity: (loansByStudent.get(s.id) || 0) + (visitsByStudent.get(s.id) || 0),
+      }))
+      .filter((s) => s.totalActivity > 0)
+      .sort((a, b) => b.totalActivity - a.totalActivity)
       .slice(0, 10);
 
     return {
       handled: true,
       data: {
+        range: {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        courses: coursesList,
+        selectedCourseId: courseFilter || null,
         summary: {
           totalStudents: students.length,
           activeStudents: students.filter((s) => s.status === 'active').length,
-          totalBooks: books.length,
-          totalCopies: copies.length,
-          availableCopies: copies.filter((c) => c.status === 'available').length,
+          totalBooks: activeBooks.length,
+          totalCopies: activeCopies.length,
+          availableCopies: activeCopies.filter((c) => c.status === 'available').length,
+          issuedCopies: activeCopies.filter((c) => c.status === 'issued').length,
+          overdueBooks: overdueLoans.length,
+          issuesInRange: issuesInRangeList.length,
+          returnsInRange: returnsInRangeList.length,
+          totalVisits: visitsInRangeList.length,
+          fineGenerated: Number(fineGenerated.toFixed(2)),
+          fineCollected: Number(fineCollected.toFixed(2)),
           totalLoans: loans.length,
           activeLoans: activeLoans.length,
           overdueLoans: overdueLoans.length,
           returnedLoans: loans.filter((l) => l.status === 'returned').length,
-          totalFinesCollected: Number(totalCollected.toFixed(2)),
+          totalFinesCollected: Number(fineCollected.toFixed(2)),
           totalFinesPending: Number(totalPending.toFixed(2)),
-          totalVisits: attendance.length,
         },
-        categoryBreakdown: Array.from(catCounts.entries()).map(([category, count]) => ({ category, count })),
-        topBooks,
-        monthlyCirculation: [],
-        dailyVisits: [],
-        departmentBreakdown: [],
+        dailyCirculation,
+        monthlyCirculation,
+        monthlyRegistrations,
+        courseWiseMembership,
+        categoryDistribution,
+        inventoryBreakdown,
+        monthlyVisitors,
+        peakVisitingHours,
+        fineCollectionTrends,
+        mostBorrowedBooks,
+        mostActiveStudents,
+        categoryBreakdown: categoryDistribution.map((c) => ({ category: c.name, count: c.value })),
+        topBooks: mostBorrowedBooks.map((b) => ({ id: b.bookId, title: b.title, isbn: b.isbn, borrowCount: b.borrowCount })),
       },
     };
   }
@@ -703,35 +1020,93 @@ export async function handleOrgAndStudentRoute(
     const rows = Array.isArray(body?.students) ? body.students : [];
     if (rows.length === 0) throw new BackendError('No student rows provided.', 400);
 
+    const defaultCourseId = body?.defaultCourseId || null;
+    const defaultSemesterId = body?.defaultSemesterId || null;
+    const defaultAcademicSessionId = body?.defaultAcademicSessionId || null;
+    const autoGenerateId = body?.autoGenerateId !== false;
+
+    const orgCourses = org.courses || [];
+    const courseById = new Map<string, any>(orgCourses.map((c: any) => [c.id, c]));
+
+    const resolveCourse = (rawLabel?: string | null) => {
+      const label = String(rawLabel || '').trim().toLowerCase();
+      if (label) {
+        const matched = orgCourses.find(
+          (c: any) =>
+            String(c.code || '').toLowerCase() === label ||
+            String(c.name || '').toLowerCase() === label ||
+            String(c.name || '').toLowerCase().includes(label)
+        );
+        if (matched) return matched;
+      }
+      if (defaultCourseId && courseById.has(defaultCourseId)) {
+        return courseById.get(defaultCourseId);
+      }
+      return null;
+    };
+
     const policy = await getPlatformPasswordPolicyDoc();
     const existing = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`);
     const existingRolls = new Set(existing.map((s) => String(s.collegeRollNumber || '').toLowerCase()));
     const existingEmails = new Set(existing.map((s) => normalizeEmail(String(s.email || ''))));
 
     const created: any[] = [];
-    const errors: Array<{ row: number; reason: string; rollNumber?: string; email?: string }> = [];
+    const failed: Array<{
+      rowNumber: number;
+      fullName: string;
+      collegeRollNumber: string;
+      email: string;
+      reason: string;
+    }> = [];
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const fullName = String(r.fullName || r.name || '').trim();
       const roll = String(r.collegeRollNumber || r.rollNumber || r.studentId || '').trim();
+      const rawEmail = String(r.email || '').trim();
       const email = normalizeEmail(
-        String(r.email || `${roll.toLowerCase().replace(/[^a-z0-9]/g, '')}@${String(org.code || 'college').toLowerCase()}.edu`)
+        rawEmail || `${roll.toLowerCase().replace(/[^a-z0-9]/g, '')}@${String(org.code || 'college').toLowerCase()}.edu`
       );
       if (!fullName || !roll) {
-        errors.push({ row: i + 1, reason: 'Missing Name or Roll Number', rollNumber: roll, email });
+        failed.push({
+          rowNumber: i + 1,
+          fullName,
+          collegeRollNumber: roll,
+          email,
+          reason: 'Missing Name or Roll Number',
+        });
         continue;
       }
       if (existingRolls.has(roll.toLowerCase())) {
-        errors.push({ row: i + 1, reason: `Duplicate Roll Number: ${roll}`, rollNumber: roll, email });
+        failed.push({
+          rowNumber: i + 1,
+          fullName,
+          collegeRollNumber: roll,
+          email,
+          reason: `Duplicate Roll Number: ${roll}`,
+        });
         continue;
       }
       if (existingEmails.has(email)) {
-        errors.push({ row: i + 1, reason: `Duplicate Email: ${email}`, rollNumber: roll, email });
+        failed.push({
+          rowNumber: i + 1,
+          fullName,
+          collegeRollNumber: roll,
+          email,
+          reason: `Duplicate Email: ${email}`,
+        });
         continue;
       }
 
-      const rawPwd = String(r.password || '').trim() || generatePolicyCompliantPassword(policy);
+      const providedPwd = String(r.password || '').trim();
+      const passwordAutoGenerated = !providedPwd;
+      const rawPwd = providedPwd || generatePolicyCompliantPassword(policy);
+      const matchedCourse = resolveCourse(r.departmentOrCourse || r.course || r.department);
+      const courseLabel =
+        matchedCourse?.name ||
+        String(r.departmentOrCourse || r.course || r.department || 'General').trim() ||
+        'General';
+
       try {
         const res = await createSingleStudentInOrg(
           org,
@@ -741,9 +1116,11 @@ export async function handleOrgAndStudentRoute(
             collegeRollNumber: roll,
             email,
             phone: r.phone || 'N/A',
-            courseId: r.courseId || null,
-            semesterId: r.semesterId || null,
-            departmentId: r.departmentId || null,
+            courseId: r.courseId || matchedCourse?.id || defaultCourseId || null,
+            semesterId: r.semesterId || defaultSemesterId || null,
+            departmentId: r.departmentId || matchedCourse?.departmentId || null,
+            academicSessionId: r.academicSessionId || defaultAcademicSessionId || null,
+            autoGenerateId,
             password: rawPwd,
           },
           ctx.roleSlug
@@ -751,27 +1128,46 @@ export async function handleOrgAndStudentRoute(
         existingRolls.add(roll.toLowerCase());
         existingEmails.add(email);
         created.push({
+          rowNumber: i + 1,
           id: res.student.id,
+          studentId: res.student.id,
           fullName: res.student.fullName,
           studentIdCode: res.student.studentIdCode,
           collegeRollNumber: res.student.collegeRollNumber,
+          departmentOrCourse: courseLabel,
+          courseId: res.student.courseId || null,
+          courseCode: matchedCourse?.code || courseLabel,
           email: res.student.email,
           loginId: res.student.email,
           password: rawPwd,
-          department: r.department || r.course || '',
+          passwordAutoGenerated,
+          phone: res.student.phone || '',
+          cardNumber: res.idCard?.cardNumber || null,
         });
       } catch (err: any) {
-        errors.push({ row: i + 1, reason: err?.message || 'Failed to create student', rollNumber: roll, email });
+        failed.push({
+          rowNumber: i + 1,
+          fullName,
+          collegeRollNumber: roll,
+          email,
+          reason: err?.message || 'Failed to create student',
+        });
       }
     }
 
     return {
       handled: true,
       data: {
-        createdCount: created.length,
-        failedCount: errors.length,
         created,
-        errors,
+        failed,
+        errors: failed,
+        summary: {
+          total: rows.length,
+          createdCount: created.length,
+          failedCount: failed.length,
+        },
+        createdCount: created.length,
+        failedCount: failed.length,
       },
     };
   }
@@ -821,12 +1217,30 @@ export async function handleOrgAndStudentRoute(
     };
   }
 
-  // Student applications
+  // Student applications (with accurate status tab filtering & academic enrichment)
   if (pathname === '/org/student-applications' && method === 'GET') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const applications = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/studentApplications`);
-    applications.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    return { handled: true, data: { applications } };
+    const [org, rawApps] = await Promise.all([
+      loadOrg(ctx.orgId),
+      safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/studentApplications`),
+    ]);
+    const statusFilter = (searchParams.get('status') || '').trim().toLowerCase();
+    const courseMap = new Map((org.courses || []).map((c: any) => [c.id, c.name]));
+    const semMap = new Map((org.semesters || []).map((s: any) => [s.id, s.name]));
+    const deptMap = new Map((org.departments || []).map((d: any) => [d.id, d.name]));
+    const sessMap = new Map((org.academicSessions || []).map((s: any) => [s.id, s.name]));
+
+    const filtered = rawApps
+      .filter((a) => !statusFilter || statusFilter === 'all' || String(a.status || 'pending').toLowerCase() === statusFilter)
+      .map((a): Record<string, any> => ({
+        ...a,
+        courseName: courseMap.get(a.courseId) || null,
+        semesterName: semMap.get(a.semesterId) || null,
+        departmentName: deptMap.get(a.departmentId) || null,
+        sessionName: sessMap.get(a.academicSessionId) || null,
+      }))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    return { handled: true, data: { applications: filtered } };
   }
 
   const appApproveMatch = pathname.match(/^\/org\/student-applications\/([^/]+)\/approve$/);
@@ -1198,24 +1612,31 @@ export async function handleOrgAndStudentRoute(
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
     ]);
+    const org = await loadOrg(ctx.orgId);
+    const shelfById = new Map<string, any>((org.shelves || []).map((s: any) => [s.id, s]));
+    const authorById = new Map<string, any>((org.authors || []).map((a: any) => [a.id, a]));
     const bookMap = new Map(books.map((b) => [b.id, b]));
     const stuMap = new Map(students.map((s) => [s.id, s]));
 
-    const lower = rawCode.toLowerCase();
-    const cleanIsbn = normalizeIsbn(rawCode);
+    const compactCode = extractCompactCode(rawCode);
+    const lower = compactCode.toLowerCase();
+    const cleanIsbn = normalizeIsbn(compactCode);
+    let matchedBy: 'barcode' | 'accession' | 'isbn' | 'title' = 'barcode';
 
     // 1. Direct physical barcode or accession match
-    let matchedCopy = copies.find(
-      (c) =>
-        String(c.barcode || '').toLowerCase() === lower ||
-        String(c.accessionNumber || '').toLowerCase() === lower
-    );
+    let matchedCopy = copies.find((c) => String(c.barcode || '').toLowerCase() === lower);
+    if (!matchedCopy) {
+      matchedCopy = copies.find((c) => String(c.accessionNumber || '').toLowerCase() === lower);
+      if (matchedCopy) matchedBy = 'accession';
+    }
 
     // 2. Fallback to ISBN match on books
+    let matchedBook: Record<string, any> | null = matchedCopy ? bookMap.get(matchedCopy.bookId) || null : null;
     if (!matchedCopy && cleanIsbn.length >= 10) {
-      const matchedBook = books.find((b) => normalizeIsbn(b.isbn) === cleanIsbn);
+      matchedBook = books.find((b) => normalizeIsbn(b.isbn) === cleanIsbn) || null;
       if (matchedBook) {
-        const bCopies = copies.filter((c) => c.bookId === matchedBook.id);
+        matchedBy = 'isbn';
+        const bCopies = copies.filter((c) => c.bookId === matchedBook!.id && c.status !== 'archived');
         matchedCopy =
           (mode === 'return'
             ? bCopies.find((c) => c.status === 'issued')
@@ -1225,9 +1646,10 @@ export async function handleOrgAndStudentRoute(
 
     // 3. Fallback to Title search
     if (!matchedCopy) {
-      const matchedBook = books.find((b) => String(b.title || '').toLowerCase().includes(lower));
+      matchedBook = books.find((b) => String(b.title || '').toLowerCase().includes(lower)) || null;
       if (matchedBook) {
-        const bCopies = copies.filter((c) => c.bookId === matchedBook.id);
+        matchedBy = 'title';
+        const bCopies = copies.filter((c) => c.bookId === matchedBook!.id && c.status !== 'archived');
         matchedCopy =
           (mode === 'return'
             ? bCopies.find((c) => c.status === 'issued')
@@ -1236,26 +1658,67 @@ export async function handleOrgAndStudentRoute(
     }
 
     if (!matchedCopy) {
-      throw new BackendError(`No book copy found matching "${rawCode}".`, 404);
+      throw new BackendError(`No book copy found matching "${compactCode}".`, 404);
     }
 
-    const book = bookMap.get(matchedCopy.bookId) || null;
-    const activeLoan = loans.find((l) => l.bookCopyId === matchedCopy!.id && l.status !== 'returned') || null;
-    const borrower = activeLoan ? stuMap.get(activeLoan.studentId) || null : null;
+    const bookRaw = matchedBook || bookMap.get(matchedCopy.bookId) || null;
+    const book = bookRaw
+      ? {
+          ...bookRaw,
+          authorName: bookRaw.authorName || authorById.get(bookRaw.authorId)?.name || 'Unknown Author',
+        }
+      : null;
+
+    const enrichCopy = (c: Record<string, any>): Record<string, any> => {
+      const shelf = c.shelfId ? shelfById.get(c.shelfId) : null;
+      const loan = loans.find((l) => l.bookCopyId === c.id && l.status !== 'returned') || null;
+      const borrower = loan ? stuMap.get(loan.studentId) || null : null;
+      return {
+        ...c,
+        rackCode: shelf?.rackCode || null,
+        shelfCode: shelf?.shelfCode || null,
+        activeLoan: loan
+          ? {
+              ...loan,
+              loanId: loan.id,
+              studentName: borrower?.fullName || 'Student',
+              studentRoll: borrower?.collegeRollNumber || '',
+              studentIdCode: borrower?.studentIdCode || '',
+              rollNumber: borrower?.collegeRollNumber || '',
+            }
+          : null,
+      };
+    };
+
+    const allBookCopies = copies
+      .filter((c) => c.bookId === matchedCopy!.bookId && c.status !== 'archived')
+      .map(enrichCopy);
+    const enrichedCopy = allBookCopies.find((c) => c.id === matchedCopy!.id) || enrichCopy(matchedCopy);
+    const inventory = {
+      total: allBookCopies.length,
+      available: allBookCopies.filter((c) => c.status === 'available').length,
+      issued: allBookCopies.filter((c) => c.status === 'issued').length,
+      reserved: allBookCopies.filter((c) => c.status === 'reserved').length,
+    };
+
+    const statusMessage =
+      enrichedCopy.status === 'available'
+        ? `Copy ${enrichedCopy.barcode} is available and ready to issue.`
+        : enrichedCopy.status === 'issued'
+          ? `Copy ${enrichedCopy.barcode} is currently issued to ${enrichedCopy.activeLoan?.studentName || 'a student'}. You can return or reassign it below.`
+          : `Copy ${enrichedCopy.barcode} is currently marked as ${enrichedCopy.status}.`;
 
     return {
       handled: true,
       data: {
         type: 'book_copy',
-        copy: matchedCopy,
+        matchedBy,
+        statusMessage,
+        copy: enrichedCopy,
+        copies: allBookCopies,
         book,
-        activeLoan: activeLoan
-          ? {
-              ...activeLoan,
-              studentName: borrower?.fullName || 'Student',
-              studentRoll: borrower?.collegeRollNumber || '',
-            }
-          : null,
+        inventory,
+        activeLoan: enrichedCopy.activeLoan,
       },
     };
   }
@@ -1270,10 +1733,11 @@ export async function handleOrgAndStudentRoute(
     return { handled: true, data: { ok: true } };
   }
 
-  // Circulation: resolve student, issue, return, renew, list loans
+  // Circulation: resolve student, issue, reassign, return, renew, list loans
   if (pathname === '/org/circulation/resolve-student' && method === 'GET') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const q = (searchParams.get('q') || '').trim().toLowerCase();
+    const rawQ = searchParams.get('q') || '';
+    const q = extractCompactCode(rawQ).toLowerCase();
     if (!q) throw new BackendError('Enter Student ID, Roll Number, Email, or scan QR code.', 400);
 
     const [org, students, cards, loans, fines] = await Promise.all([
@@ -1296,7 +1760,7 @@ export async function handleOrgAndStudentRoute(
           String(s.fullName || '').toLowerCase().includes(q)
       );
 
-    if (!student) throw new BackendError(`No student found matching "${q}".`, 404);
+    if (!student) throw new BackendError(`No student found matching "${extractCompactCode(rawQ)}".`, 404);
 
     const activeLoansCount = loans.filter((l) => l.studentId === student.id && l.status !== 'returned').length;
     const outstandingFines = fines
@@ -1305,11 +1769,12 @@ export async function handleOrgAndStudentRoute(
     const cat = (org.studentCategories || []).find((c: any) => c.id === student.studentCategoryId);
     const maxBooksAllowed = Number(cat?.maxBooksAllowed || org.settings?.maxBooksPerStudent || 4);
     const maxFine = Number(org.settings?.maxOutstandingFineForBorrow || 100);
+    const defaultLoanDays = Number(cat?.loanDurationDays || org.settings?.defaultLoanDays || 14);
 
     const reasons: string[] = [];
     if (student.status !== 'active') reasons.push(`Student account is ${student.status}.`);
     if (activeLoansCount >= maxBooksAllowed) reasons.push(`Borrowing limit reached (${activeLoansCount}/${maxBooksAllowed}).`);
-    if (outstandingFines > maxFine) reasons.push(`Outstanding fines (${outstandingFines}) exceed threshold (${maxFine}).`);
+    if (outstandingFines > maxFine) reasons.push(`Outstanding fines (${outstandingFines.toFixed(2)}) exceed threshold (${maxFine}).`);
 
     return {
       handled: true,
@@ -1318,10 +1783,13 @@ export async function handleOrgAndStudentRoute(
         eligibility: {
           eligible: reasons.length === 0,
           reasons,
+          blockReason: reasons[0] || null,
           activeLoansCount,
           maxBooksAllowed,
           outstandingFines: Number(outstandingFines.toFixed(2)),
-          defaultLoanDays: Number(cat?.loanDurationDays || org.settings?.defaultLoanDays || 14),
+          outstandingFine: Number(outstandingFines.toFixed(2)),
+          defaultLoanDays,
+          loanDurationDays: defaultLoanDays,
         },
       },
     };
@@ -1329,12 +1797,21 @@ export async function handleOrgAndStudentRoute(
 
   if (pathname === '/org/circulation/issue' && method === 'POST') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const org = await loadOrg(ctx.orgId);
-    const student = await safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/students/${body?.studentId}`);
-    const copy = await safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/bookCopies/${body?.bookCopyId}`);
+    const [org, student, copy, existingLoans] = await Promise.all([
+      loadOrg(ctx.orgId),
+      safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/students/${body?.studentId}`),
+      safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/bookCopies/${body?.bookCopyId}`),
+      safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`),
+    ]);
     if (!student) throw new BackendError('Student not found.', 404);
     if (!copy) throw new BackendError('Book copy not found.', 404);
-    if (copy.status !== 'available') throw new BackendError(`Book copy is currently ${copy.status}.`, 409);
+    if (student.status !== 'active') {
+      throw new BackendError(`Cannot issue book: student account is ${student.status}.`, 400);
+    }
+    const existingActiveForCopy = existingLoans.find((l) => l.bookCopyId === copy.id && l.status !== 'returned');
+    if (copy.status !== 'available' || existingActiveForCopy) {
+      throw new BackendError(`Book copy ${copy.barcode} is already ${copy.status === 'available' ? 'allocated to an active loan' : copy.status}.`, 409);
+    }
     const book = await safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/books/${copy.bookId}`);
 
     const dueDays = Number(body?.dueDays || org.settings?.defaultLoanDays || 14);
@@ -1386,11 +1863,138 @@ export async function handleOrgAndStudentRoute(
       details: { studentId: student.id, barcode: copy.barcode },
     });
 
+    const receipt = {
+      receiptNumber,
+      issuedAt: ts,
+      dueAt: dueAt.toISOString(),
+      bookTitle: book?.title || 'Book',
+      barcode: copy.barcode,
+      studentName: student.fullName,
+      studentIdCode: student.studentIdCode || student.collegeRollNumber || '',
+    };
+
     return {
       handled: true,
       data: {
         loan: { ...loanDoc, bookTitle: book?.title || 'Book', studentName: student.fullName, barcode: copy.barcode },
+        receipt,
         message: 'Book issued successfully.',
+      },
+    };
+  }
+
+  // Atomic Reassign of an currently-issued book copy to another eligible student
+  if (pathname === '/org/circulation/reassign' && method === 'POST') {
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
+    const bookCopyId = String(body?.bookCopyId || '').trim();
+    const newStudentId = String(body?.studentId || '').trim();
+    if (!bookCopyId || !newStudentId) {
+      throw new BackendError('Book copy and target student are required for reassignment.', 400);
+    }
+
+    const [org, newStudent, copy, allLoans] = await Promise.all([
+      loadOrg(ctx.orgId),
+      safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/students/${newStudentId}`),
+      safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/bookCopies/${bookCopyId}`),
+      safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`),
+    ]);
+    if (!newStudent) throw new BackendError('Target student not found.', 404);
+    if (!copy) throw new BackendError('Book copy not found.', 404);
+    if (newStudent.status !== 'active') {
+      throw new BackendError(`Cannot reassign: target student account is ${newStudent.status}.`, 400);
+    }
+
+    const activeLoan = allLoans.find((l) => l.bookCopyId === copy.id && l.status !== 'returned');
+    if (!activeLoan) {
+      throw new BackendError('This book copy has no active loan to reassign. Use Issue instead.', 409);
+    }
+    if (activeLoan.studentId === newStudent.id) {
+      throw new BackendError('This book copy is already issued to the selected student.', 409);
+    }
+
+    const cat = (org.studentCategories || []).find((c: any) => c.id === newStudent.studentCategoryId);
+    const maxBooks = Number(cat?.maxBooksAllowed || org.settings?.maxBooksPerStudent || 4);
+    const studentActiveLoans = allLoans.filter((l) => l.studentId === newStudent.id && l.status !== 'returned').length;
+    if (studentActiveLoans >= maxBooks) {
+      throw new BackendError(`${newStudent.fullName} has already reached the borrowing limit (${studentActiveLoans}/${maxBooks}).`, 409);
+    }
+
+    const book = await safeGetDoc<Record<string, any>>(`organizations/${ctx.orgId}/books/${copy.bookId}`);
+    const ts = nowIso();
+    const dueDays = Number(body?.dueDays || cat?.loanDurationDays || org.settings?.defaultLoanDays || 14);
+    const dueAt = new Date();
+    dueAt.setDate(dueAt.getDate() + dueDays);
+    const newLoanId = makeId('ln');
+    const receiptNumber = `RCP-${Date.now().toString().slice(-6)}`;
+
+    // 1. Close previous loan cleanly
+    await safeUpdateDoc(`organizations/${ctx.orgId}/loans/${activeLoan.id}`, {
+      status: 'returned',
+      returnedAt: ts,
+      conditionOnReturn: 'reassigned',
+      updatedAt: ts,
+    });
+
+    // 2. Create new loan for target student
+    const newLoanDoc = {
+      id: newLoanId,
+      organizationId: ctx.orgId,
+      studentId: newStudent.id,
+      studentUserId: newStudent.userId || null,
+      bookId: copy.bookId,
+      bookCopyId: copy.id,
+      receiptNumber,
+      issuedAt: ts,
+      dueAt: dueAt.toISOString(),
+      returnedAt: null,
+      renewalCount: 0,
+      status: 'issued',
+      issuedByUid: ctx.fbUser.uid,
+      reassignedFromLoanId: activeLoan.id,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    await safeSetDoc(`organizations/${ctx.orgId}/loans/${newLoanId}`, newLoanDoc);
+    await safeUpdateDoc(`organizations/${ctx.orgId}/bookCopies/${copy.id}`, {
+      status: 'issued',
+      updatedAt: ts,
+    });
+
+    if (newStudent.userId) {
+      await createUserNotification({
+        recipientUid: newStudent.userId,
+        organizationId: ctx.orgId,
+        type: 'book_issued',
+        title: 'Book Assigned to Your Account',
+        message: `"${book?.title || 'Book'}" (Barcode: ${copy.barcode}) was assigned to you. Due on ${dueAt.toLocaleDateString()}.`,
+        entityType: 'loan',
+        entityId: newLoanId,
+      });
+    }
+
+    await writeOrgAudit({
+      organizationId: ctx.orgId,
+      actorRole: ctx.roleSlug,
+      action: 'book_reassigned',
+      entityType: 'loan',
+      entityId: newLoanId,
+      details: { previousLoanId: activeLoan.id, previousStudentId: activeLoan.studentId, newStudentId: newStudent.id, barcode: copy.barcode },
+    });
+
+    return {
+      handled: true,
+      data: {
+        loan: { ...newLoanDoc, bookTitle: book?.title || 'Book', studentName: newStudent.fullName, barcode: copy.barcode },
+        receipt: {
+          receiptNumber,
+          issuedAt: ts,
+          dueAt: dueAt.toISOString(),
+          bookTitle: book?.title || 'Book',
+          barcode: copy.barcode,
+          studentName: newStudent.fullName,
+          studentIdCode: newStudent.studentIdCode || newStudent.collegeRollNumber || '',
+        },
+        message: `Book copy ${copy.barcode} reassigned to ${newStudent.fullName}.`,
       },
     };
   }
@@ -1684,13 +2288,19 @@ export async function handleOrgAndStudentRoute(
         rollNumber: stuMap.get(e.studentId)?.collegeRollNumber || '',
         studentIdCode: stuMap.get(e.studentId)?.studentIdCode || '',
       }));
+    const nowDate = new Date();
+    const localTodayPrefix = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}-${String(nowDate.getDate()).padStart(2, '0')}`;
+    const isTodayDate = (iso?: string | null) =>
+      Boolean(iso) && (String(iso).startsWith(todayPrefix) || String(iso).startsWith(localTodayPrefix));
+
     return {
       handled: true,
       data: {
         entries: enriched,
         stats: {
-          todayTotal: enriched.filter((e) => String(e.checkInAt || '').startsWith(todayPrefix)).length,
+          todayTotal: enriched.filter((e) => isTodayDate(e.checkInAt)).length,
           currentlyInside: enriched.filter((e) => !e.checkOutAt).length,
+          checkedOutToday: enriched.filter((e) => Boolean(e.checkOutAt) && isTodayDate(e.checkOutAt)).length,
           totalVisits: enriched.length,
         },
       },
@@ -1699,7 +2309,10 @@ export async function handleOrgAndStudentRoute(
 
   if (pathname === '/org/attendance/scan' && method === 'POST') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const code = String(body?.code || body?.query || '').trim().toLowerCase();
+    const compact = extractCompactCode(String(body?.code || body?.query || ''));
+    const code = compact.toLowerCase();
+    if (!code) throw new BackendError('Please scan a Student QR code or enter Roll Number / Student ID.', 400);
+
     const [students, cards, entries] = await Promise.all([
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
       safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/idCards`),
@@ -1714,7 +2327,7 @@ export async function handleOrgAndStudentRoute(
           String(s.collegeRollNumber || '').toLowerCase() === code ||
           String(s.email || '').toLowerCase() === code
       );
-    if (!stu) throw new BackendError(`No student found matching "${code}".`, 404);
+    if (!stu) throw new BackendError(`No student found matching "${compact}".`, 404);
 
     const openEntry = entries.find((e) => e.studentId === stu.id && !e.checkOutAt);
     const ts = nowIso();
@@ -1760,99 +2373,339 @@ export async function handleOrgAndStudentRoute(
     return { handled: true, data: { message: 'Checked out.' } };
   }
 
-  // Migration Center
+  // Migration Center (supports College Admin & Librarian with full dry-run validation)
   if (pathname === '/org/migrations/history' && method === 'GET') {
-    const ctx = await requireOrgAccess(orgId, ['college_admin']);
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
     const runs = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/migrations`);
+    runs.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     return { handled: true, data: { runs } };
   }
 
   if (pathname === '/org/migrations/validate' && method === 'POST') {
-    await requireOrgAccess(orgId, ['college_admin']);
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
+    const importType = String(body?.importType || 'books');
     const rows = Array.isArray(body?.rows) ? body.rows : [];
-    const validRows = rows.filter((r: any) => Object.values(r || {}).some((v) => String(v || '').trim() !== ''));
+
+    const validRows: Array<{ rowNumber: number; data: Record<string, any> }> = [];
+    const duplicateRows: Array<{ rowNumber: number; reason: string; raw: Record<string, any> }> = [];
+    const errorRows: Array<{ rowNumber: number; errors: string[]; raw: Record<string, any> }> = [];
+
+    if (importType === 'books') {
+      const existingBooks = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/books`);
+      const existingIsbns = new Set(existingBooks.map((b) => normalizeIsbn(b.isbn)).filter(Boolean));
+      const seenIsbns = new Set<string>();
+
+      rows.forEach((raw: Record<string, any>, idx: number) => {
+        const rowNumber = idx + 1;
+        const title = String(raw?.title || '').trim();
+        const isbn = normalizeIsbn(raw?.isbn);
+        const errs: string[] = [];
+        if (!title) errs.push('Missing book title');
+        if (errs.length > 0) {
+          errorRows.push({ rowNumber, errors: errs, raw });
+          return;
+        }
+        if (isbn && (existingIsbns.has(isbn) || seenIsbns.has(isbn))) {
+          duplicateRows.push({ rowNumber, reason: `Duplicate ISBN ${isbn}`, raw });
+          return;
+        }
+        if (isbn) seenIsbns.add(isbn);
+        validRows.push({ rowNumber, data: { ...raw, title, isbn: raw?.isbn || '' } });
+      });
+    } else if (importType === 'students') {
+      const existingStudents = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`);
+      const existingRolls = new Set(existingStudents.map((s) => String(s.collegeRollNumber || '').toLowerCase()));
+      const existingEmails = new Set(existingStudents.map((s) => normalizeEmail(String(s.email || ''))));
+      const seenRolls = new Set<string>();
+      const seenEmails = new Set<string>();
+
+      rows.forEach((raw: Record<string, any>, idx: number) => {
+        const rowNumber = idx + 1;
+        const fullName = String(raw?.fullName || raw?.name || '').trim();
+        const roll = String(raw?.collegeRollNumber || raw?.rollNumber || '').trim();
+        const email = normalizeEmail(String(raw?.email || ''));
+        const errs: string[] = [];
+        if (!fullName) errs.push('Missing fullName');
+        if (!roll) errs.push('Missing collegeRollNumber');
+        if (!email) errs.push('Missing email');
+        if (errs.length > 0) {
+          errorRows.push({ rowNumber, errors: errs, raw });
+          return;
+        }
+        if (existingRolls.has(roll.toLowerCase()) || seenRolls.has(roll.toLowerCase())) {
+          duplicateRows.push({ rowNumber, reason: `Duplicate roll number ${roll}`, raw });
+          return;
+        }
+        if (existingEmails.has(email) || seenEmails.has(email)) {
+          duplicateRows.push({ rowNumber, reason: `Duplicate email ${email}`, raw });
+          return;
+        }
+        seenRolls.add(roll.toLowerCase());
+        seenEmails.add(email);
+        validRows.push({ rowNumber, data: { ...raw, fullName, collegeRollNumber: roll, email } });
+      });
+    } else {
+      rows.forEach((raw: Record<string, any>, idx: number) => {
+        const rowNumber = idx + 1;
+        const hasValues = Object.values(raw || {}).some((v) => String(v || '').trim() !== '');
+        if (!hasValues) {
+          errorRows.push({ rowNumber, errors: ['Empty row'], raw });
+        } else {
+          validRows.push({ rowNumber, data: raw });
+        }
+      });
+    }
+
     return {
       handled: true,
       data: {
         totalRows: rows.length,
         validCount: validRows.length,
-        errorCount: rows.length - validRows.length,
-        errors: [],
+        duplicateCount: duplicateRows.length,
+        errorCount: errorRows.length,
+        validRows,
+        duplicateRows,
+        errorRows,
       },
     };
   }
 
   if (pathname === '/org/migrations/commit' && method === 'POST') {
-    const ctx = await requireOrgAccess(orgId, ['college_admin']);
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
     const org = await loadOrg(ctx.orgId);
-    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    const rawRows = Array.isArray(body?.validRows)
+      ? body.validRows
+      : Array.isArray(body?.rows)
+        ? body.rows
+        : [];
+    const importType = String(body?.importType || 'books');
     let importedCount = 0;
-    if (body?.importType === 'books') {
-      for (const r of rows) {
-        if (!r?.title) continue;
-        await createBookWithCopies(ctx.orgId, r, ctx.roleSlug).catch(() => {});
-        importedCount++;
+    let skippedCount = 0;
+
+    if (importType === 'books') {
+      for (const item of rawRows) {
+        const r = item?.data && typeof item.data === 'object' ? item.data : item;
+        if (!r?.title) {
+          skippedCount++;
+          continue;
+        }
+        try {
+          await createBookWithCopies(ctx.orgId, r, ctx.roleSlug);
+          importedCount++;
+        } catch {
+          skippedCount++;
+        }
       }
-    } else if (body?.importType === 'students') {
-      for (const r of rows) {
-        if (!r?.fullName && !r?.name) continue;
-        await createSingleStudentInOrg(org, r, ctx.roleSlug).catch(() => {});
+    } else if (importType === 'students') {
+      for (const item of rawRows) {
+        const r = item?.data && typeof item.data === 'object' ? item.data : item;
+        if (!r?.fullName && !r?.name) {
+          skippedCount++;
+          continue;
+        }
+        try {
+          await createSingleStudentInOrg(org, r, ctx.roleSlug);
+          importedCount++;
+        } catch {
+          skippedCount++;
+        }
+      }
+    } else if (importType === 'book_copies') {
+      const books = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/books`);
+      const bookByIsbn = new Map(books.map((b) => [normalizeIsbn(b.isbn), b]));
+      for (const item of rawRows) {
+        const r = item?.data && typeof item.data === 'object' ? item.data : item;
+        const book = bookByIsbn.get(normalizeIsbn(r?.isbn));
+        if (!book || !r?.barcode) {
+          skippedCount++;
+          continue;
+        }
+        const copyId = makeId('cpy');
+        const ts = nowIso();
+        await safeSetDoc(`organizations/${ctx.orgId}/bookCopies/${copyId}`, {
+          id: copyId,
+          organizationId: ctx.orgId,
+          bookId: book.id,
+          barcode: String(r.barcode).trim(),
+          accessionNumber: String(r.accessionNumber || `ACC-${Date.now().toString().slice(-5)}`),
+          condition: String(r.condition || 'good'),
+          status: 'available',
+          createdAt: ts,
+          updatedAt: ts,
+        });
         importedCount++;
       }
     }
+
     const runId = makeId('mig');
     const run = {
       id: runId,
       organizationId: ctx.orgId,
-      importType: body?.importType || 'books',
+      importType,
       fileName: body?.fileName || 'import.csv',
+      totalRows: Number(body?.totalRows || rawRows.length),
+      validRows: rawRows.length,
+      importedRows: importedCount,
       importedCount,
+      skippedRows: Number(body?.duplicateCount || 0) + skippedCount,
+      failedRows: Number(body?.errorCount || 0),
       status: 'completed',
       createdAt: nowIso(),
     };
     await safeSetDoc(`organizations/${ctx.orgId}/migrations/${runId}`, run);
-    return { handled: true, data: { run, importedCount } };
+    return {
+      handled: true,
+      data: {
+        run,
+        importedCount,
+        message: `Successfully imported ${importedCount} record(s) into Cloud Firestore.`,
+      },
+    };
   }
 
-  // Notification Center
+  // Notification Center (accessible to Admin, Librarian & Student with real providers + deliveries)
   if (pathname === '/org/notifications/center' && method === 'GET') {
-    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian', 'student']);
     const [org, notifs] = await Promise.all([
       loadOrg(ctx.orgId),
       safeListDocs<Record<string, any>>('notifications', [where('recipientUid', '==', ctx.fbUser.uid)]),
     ]);
+    const defaultCategories = {
+      registration: true,
+      id_status: true,
+      circulation: true,
+      due_reminders: true,
+      overdue: true,
+      reservations: true,
+      fines: true,
+      attendance: true,
+      announcements: true,
+    };
+    const storedPrefs = org.notificationPreferences || {};
+    const preferences = {
+      inAppEnabled: storedPrefs.inAppEnabled ?? true,
+      emailEnabled: Boolean(storedPrefs.emailEnabled),
+      pushEnabled: Boolean(storedPrefs.pushEnabled ?? storedPrefs.webPushEnabled),
+      dueReminderDaysBefore: Number(storedPrefs.dueReminderDaysBefore ?? 2),
+      overdueDigestEnabled: storedPrefs.overdueDigestEnabled ?? true,
+      categories: { ...defaultCategories, ...(storedPrefs.categories || {}) },
+    };
+    const templates = (org.notificationTemplates || []).map((t: any) => ({
+      ...t,
+      isEnabled: t.isEnabled ?? t.isActive ?? true,
+    }));
+    const deliveries = (Array.isArray(org.notificationDeliveries) ? org.notificationDeliveries : []).map(
+      (d: any) => ({
+        id: d.id || makeId('dlv'),
+        recipientEmail: d.recipientEmail || d.recipientAddress || 'In-App Student',
+        channel: d.channel || 'in_app',
+        status: d.status || 'delivered',
+        providerResponse: d.providerResponse || d.errorMessage || d.subject || 'Delivered via Cloud Firestore',
+        createdAt: d.createdAt || d.sentAt || nowIso(),
+      })
+    );
     return {
       handled: true,
       data: {
         notifications: notifs.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))),
-        preferences: org.notificationPreferences || { inAppEnabled: true, emailEnabled: false, dueReminderDaysBefore: 2, overdueDigestEnabled: true },
-        templates: org.notificationTemplates || [],
+        preferences,
+        templates,
+        deliveries,
+        providers: {
+          smtpConfigured: false,
+          webPushConfigured: false,
+          whatsappConfigured: false,
+        },
       },
     };
   }
 
   if (pathname === '/org/notifications/preferences' && (method === 'PUT' || method === 'PATCH')) {
-    const ctx = await requireOrgAccess(orgId, ['college_admin']);
-    await safeUpdateDoc(`organizations/${ctx.orgId}`, { notificationPreferences: body, updatedAt: nowIso() });
-    return { handled: true, data: { preferences: body } };
+    const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
+    const org = await loadOrg(ctx.orgId);
+    const nextPrefs = {
+      inAppEnabled: true,
+      emailEnabled: false,
+      pushEnabled: false,
+      dueReminderDaysBefore: 2,
+      overdueDigestEnabled: true,
+      categories: {},
+      ...(org.notificationPreferences || {}),
+      ...(body || {}),
+    };
+    await safeUpdateDoc(`organizations/${ctx.orgId}`, {
+      notificationPreferences: nextPrefs,
+      updatedAt: nowIso(),
+    });
+    return { handled: true, data: { preferences: nextPrefs } };
   }
 
   if (pathname === '/org/notifications/announce' && method === 'POST') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
-    const students = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`);
+    const [org, students] = await Promise.all([
+      loadOrg(ctx.orgId),
+      safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/students`),
+    ]);
+    const title = String(body?.title || 'Library Announcement').trim();
+    const message = String(body?.message || '').trim();
+    if (!title || !message) {
+      throw new BackendError('Announcement title and message are required.', 400);
+    }
+
     let count = 0;
+    const newLogs: any[] = [];
+    const ts = nowIso();
     for (const s of students) {
       if (!s.userId) continue;
       await createUserNotification({
         recipientUid: s.userId,
         organizationId: ctx.orgId,
         type: 'announcement',
-        title: String(body?.title || 'Library Announcement'),
-        message: String(body?.message || ''),
+        title,
+        message,
       });
       count++;
+      if (newLogs.length < 25) {
+        newLogs.push({
+          id: makeId('dlv'),
+          channel: 'in_app',
+          recipientEmail: s.email || s.fullName,
+          subject: title,
+          status: 'delivered',
+          providerResponse: `In-app notification delivered (${title})`,
+          createdAt: ts,
+        });
+      }
     }
-    return { handled: true, data: { message: `Announcement delivered to ${count} student(s).` } };
+
+    if (newLogs.length === 0) {
+      newLogs.push({
+        id: makeId('dlv'),
+        channel: 'in_app',
+        recipientEmail: 'All Active Students (0 linked accounts)',
+        subject: title,
+        status: 'skipped',
+        providerResponse: 'No student portal accounts linked yet.',
+        createdAt: ts,
+      });
+    }
+
+    const nextDeliveries = [...newLogs, ...(org.notificationDeliveries || [])].slice(0, 80);
+    await safeUpdateDoc(`organizations/${ctx.orgId}`, {
+      notificationDeliveries: nextDeliveries,
+      updatedAt: ts,
+    }).catch(() => {});
+
+    return {
+      handled: true,
+      data: {
+        deliveredCount: count,
+        message:
+          count > 0
+            ? `Announcement delivered to ${count} student account(s).`
+            : 'Announcement logged (no student portal accounts linked yet).',
+      },
+    };
   }
 
   const ntplMatch = pathname.match(/^\/org\/notifications\/templates\/([^/]+)$/);
@@ -1909,19 +2762,20 @@ export async function handleOrgAndStudentRoute(
   }
 
   // Smart Automation Center (/org/automations)
+  const DEFAULT_AUTOMATION_JOBS = [
+    { id: 'auto_due_reminders', jobKey: 'due_reminders', name: 'Upcoming Due Reminders', description: 'Notify students 48 hours before a borrowed book is due.', scheduleCron: '0 8 * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
+    { id: 'auto_overdue_escalation', jobKey: 'overdue_escalation', name: 'Overdue Escalation Alerts', description: 'Flag overdue loans and notify borrowers automatically.', scheduleCron: '0 9 * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
+    { id: 'auto_reservation_expiry', jobKey: 'reservation_expiry', name: 'Reservation Hold Expiry', description: 'Release expired reservation holds back to circulation.', scheduleCron: '0 * * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
+  ];
+
   if (pathname === '/org/automations' && method === 'GET') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
     const org = await loadOrg(ctx.orgId);
-    const defaultJobs = [
-      { id: 'auto_due_reminders', jobKey: 'due_reminders', name: 'Upcoming Due Reminders', description: 'Notify students 48 hours before a borrowed book is due.', scheduleCron: '0 8 * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
-      { id: 'auto_overdue_escalation', jobKey: 'overdue_escalation', name: 'Overdue Escalation Alerts', description: 'Flag overdue loans and notify borrowers automatically.', scheduleCron: '0 9 * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
-      { id: 'auto_reservation_expiry', jobKey: 'reservation_expiry', name: 'Reservation Hold Expiry', description: 'Release expired reservation holds back to circulation.', scheduleCron: '0 * * * *', isEnabled: true, lastRunAt: null, lastStatus: 'idle', lastSummary: null },
-    ];
     return {
       handled: true,
       data: {
-        jobs: org.automationJobs || defaultJobs,
-        logs: org.automationLogs || [],
+        jobs: Array.isArray(org.automationJobs) && org.automationJobs.length > 0 ? org.automationJobs : DEFAULT_AUTOMATION_JOBS,
+        logs: Array.isArray(org.automationLogs) ? org.automationLogs : [],
       },
     };
   }
@@ -1930,37 +2784,131 @@ export async function handleOrgAndStudentRoute(
   if (autoToggleMatch && (method === 'PATCH' || method === 'PUT')) {
     const ctx = await requireOrgAccess(orgId, ['college_admin']);
     const org = await loadOrg(ctx.orgId);
-    const currentJobs = org.automationJobs || [
-      { id: 'auto_due_reminders', jobKey: 'due_reminders', name: 'Upcoming Due Reminders', description: 'Notify students 48 hours before a borrowed book is due.', scheduleCron: '0 8 * * *', isEnabled: true },
-      { id: 'auto_overdue_escalation', jobKey: 'overdue_escalation', name: 'Overdue Escalation Alerts', description: 'Flag overdue loans and notify borrowers automatically.', scheduleCron: '0 9 * * *', isEnabled: true },
-      { id: 'auto_reservation_expiry', jobKey: 'reservation_expiry', name: 'Reservation Hold Expiry', description: 'Release expired reservation holds back to circulation.', scheduleCron: '0 * * * *', isEnabled: true },
-    ];
-    const nextJobs = currentJobs.map((j: any) => (j.id === autoToggleMatch[1] ? { ...j, isEnabled: Boolean(body?.isEnabled) } : j));
+    const currentJobs =
+      Array.isArray(org.automationJobs) && org.automationJobs.length > 0
+        ? org.automationJobs
+        : DEFAULT_AUTOMATION_JOBS;
+    const nextJobs = currentJobs.map((j: any) =>
+      j.id === autoToggleMatch[1] || j.jobKey === autoToggleMatch[1]
+        ? { ...j, isEnabled: Boolean(body?.isEnabled) }
+        : j
+    );
     await safeUpdateDoc(`organizations/${ctx.orgId}`, { automationJobs: nextJobs, updatedAt: nowIso() });
-    return { handled: true, data: { ok: true } };
+    return { handled: true, data: { ok: true, jobs: nextJobs } };
   }
 
   const autoRunMatch = pathname.match(/^\/org\/automations\/([^/]+)\/run$/);
   if (autoRunMatch && method === 'POST') {
     const ctx = await requireOrgAccess(orgId, ['college_admin', 'librarian']);
     const org = await loadOrg(ctx.orgId);
-    const loans = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`);
+    const currentJobs =
+      Array.isArray(org.automationJobs) && org.automationJobs.length > 0
+        ? org.automationJobs
+        : DEFAULT_AUTOMATION_JOBS;
+    const targetJob = currentJobs.find(
+      (j: any) => j.id === autoRunMatch[1] || j.jobKey === autoRunMatch[1]
+    );
+    const jobKey = targetJob?.jobKey || autoRunMatch[1];
     const now = new Date();
-    const overdueCount = loans.filter((l) => l.status !== 'returned' && new Date(l.dueAt) < now).length;
     const ts = nowIso();
+
+    let processedCount = 0;
+    let notificationsSent = 0;
+    let summary = '';
+
+    if (jobKey === 'reservation_expiry') {
+      const reservations = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/reservations`);
+      const holdDays = Number(org.settings?.reservationHoldDays || 3);
+      processedCount = reservations.length;
+      for (const r of reservations) {
+        if (r.status === 'ready') {
+          const refDate = new Date(r.expiresAt || r.updatedAt || r.createdAt);
+          const expiry = r.expiresAt
+            ? refDate
+            : new Date(refDate.getTime() + holdDays * 86400_000);
+          if (expiry < now) {
+            await safeUpdateDoc(`organizations/${ctx.orgId}/reservations/${r.id}`, {
+              status: 'expired',
+              updatedAt: ts,
+            }).catch(() => {});
+            notificationsSent++;
+          }
+        }
+      }
+      summary = `Checked ${processedCount} reservation(s); expired ${notificationsSent} past-hold reservation(s).`;
+    } else if (jobKey === 'due_reminders') {
+      const loans = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`);
+      const windowHours = Number(org.notificationPreferences?.dueReminderDaysBefore || 2) * 24;
+      const horizon = new Date(now.getTime() + windowHours * 3600_000);
+      const active = loans.filter((l) => l.status !== 'returned');
+      processedCount = active.length;
+      for (const l of active) {
+        const due = new Date(l.dueAt);
+        if (due >= now && due <= horizon && l.studentUserId) {
+          await createUserNotification({
+            recipientUid: l.studentUserId,
+            organizationId: ctx.orgId,
+            type: 'due_reminder',
+            title: 'Upcoming Book Return Due',
+            message: `Reminder: your borrowed book is due on ${due.toLocaleDateString()}. Return or renew in time to avoid fines.`,
+            entityType: 'loan',
+            entityId: l.id,
+          });
+          notificationsSent++;
+        }
+      }
+      summary = `Scanned ${processedCount} active loan(s); sent ${notificationsSent} upcoming due reminder(s).`;
+    } else {
+      const loans = await safeListDocs<Record<string, any>>(`organizations/${ctx.orgId}/loans`);
+      const active = loans.filter((l) => l.status !== 'returned');
+      processedCount = active.length;
+      for (const l of active) {
+        if (new Date(l.dueAt) < now) {
+          if (l.status !== 'overdue') {
+            await safeUpdateDoc(`organizations/${ctx.orgId}/loans/${l.id}`, {
+              status: 'overdue',
+              updatedAt: ts,
+            }).catch(() => {});
+          }
+          if (l.studentUserId) {
+            await createUserNotification({
+              recipientUid: l.studentUserId,
+              organizationId: ctx.orgId,
+              type: 'overdue_alert',
+              title: 'Overdue Library Book Alert',
+              message: `Your borrowed book was due on ${new Date(l.dueAt).toLocaleDateString()}. Please return it immediately to prevent additional fines.`,
+              entityType: 'loan',
+              entityId: l.id,
+            });
+            notificationsSent++;
+          }
+        }
+      }
+      summary = `Scanned ${processedCount} active loan(s); notified ${notificationsSent} overdue borrower(s).`;
+    }
+
     const logEntry = {
       id: makeId('alog'),
-      jobKey: autoRunMatch[1],
+      jobKey,
       triggerSource: 'manual',
       status: 'completed',
-      processedCount: loans.length,
-      notificationsSent: overdueCount,
-      summary: `Scanned ${loans.length} loan record(s); identified ${overdueCount} overdue item(s).`,
+      processedCount,
+      notificationsSent,
+      summary,
       executedAt: ts,
     };
+    const nextJobs = currentJobs.map((j: any) =>
+      j.id === autoRunMatch[1] || j.jobKey === jobKey
+        ? { ...j, lastRunAt: ts, lastStatus: 'completed', lastSummary: summary }
+        : j
+    );
     const nextLogs = [logEntry, ...(org.automationLogs || [])].slice(0, 50);
-    await safeUpdateDoc(`organizations/${ctx.orgId}`, { automationLogs: nextLogs, updatedAt: ts });
-    return { handled: true, data: { message: logEntry.summary, log: logEntry } };
+    await safeUpdateDoc(`organizations/${ctx.orgId}`, {
+      automationJobs: nextJobs,
+      automationLogs: nextLogs,
+      updatedAt: ts,
+    });
+    return { handled: true, data: { message: summary, log: logEntry } };
   }
 
   return { handled: false };
@@ -2002,7 +2950,7 @@ async function createSingleStudentInOrg(org: Record<string, any>, input: any, ac
   const studentIdCode = `STU-${String(org.code || 'ORG').slice(0, 4).toUpperCase()}-${Math.floor(10000 + Math.random() * 90000)}`;
 
   if (uid) {
-    if (actorRole === 'super_admin') {
+    if (actorRole === 'platform_super_admin' || actorRole === 'super_admin') {
       await safeSetDoc(`users/${uid}`, {
         uid,
         email,
@@ -2076,7 +3024,7 @@ async function createSingleStudentInOrg(org: Record<string, any>, input: any, ac
   };
 
   await safeSetDoc(`organizations/${org.id}/students/${stuId}`, studentDoc);
-  const idCard = await issueStudentIdCard(org, studentDoc);
+  const idCard = input?.autoGenerateId === false ? null : await issueStudentIdCard(org, studentDoc);
 
   await writeOrgAudit({
     organizationId: org.id,

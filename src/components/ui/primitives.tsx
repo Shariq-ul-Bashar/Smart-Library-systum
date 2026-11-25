@@ -205,29 +205,34 @@ export function MetricTile({
         to && 'hover:border-[#4F46E5]/40 hover:shadow-sm group'
       )}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 truncate">
+      <div className="flex items-start justify-between gap-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium leading-snug text-slate-500 dark:text-slate-400 line-clamp-2">
             {label}
           </div>
-          <div className={cn('mt-2 text-2xl font-display font-bold tabular-nums', valueTone)}>
+          <div
+            className={cn(
+              'mt-2 text-xl sm:text-2xl font-display font-bold leading-tight tabular-nums break-words',
+              valueTone
+            )}
+          >
             {value}
           </div>
         </div>
         {Icon && (
           <div
             className={cn(
-              'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl',
+              'flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl',
               PASTEL_STYLES[pastel]
             )}
           >
-            <Icon className="h-5 w-5" />
+            <Icon className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
           </div>
         )}
       </div>
       {subtext && (
         <div className="mt-2 flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <span className="truncate">{subtext}</span>
+          <span className="leading-snug line-clamp-2">{subtext}</span>
           {to && (
             <ArrowUpRight className="h-3.5 w-3.5 shrink-0 opacity-0 group-hover:opacity-100 text-[#4F46E5] transition-opacity" />
           )}

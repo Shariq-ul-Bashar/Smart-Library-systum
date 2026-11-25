@@ -68,15 +68,14 @@ export function DigitalIdCardView({
   const [side, setSide] = useState<'front' | 'back'>(initialSide);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
 
-  const verifyUrl = data.qrToken
-    ? `${window.location.origin}/verify/${data.qrToken}`
-    : `${window.location.origin}/verify`;
+  const qrPayload = data.qrToken ? `QIV:${data.qrToken}` : data.student.studentIdCode || data.cardNumber;
 
   useEffect(() => {
     let active = true;
-    QRCode.toDataURL(verifyUrl, {
+    QRCode.toDataURL(qrPayload, {
       width: 180,
       margin: 1,
+      errorCorrectionLevel: 'M',
       color: { dark: '#0F172A', light: '#FFFFFF' },
     })
       .then((url) => {
@@ -86,7 +85,7 @@ export function DigitalIdCardView({
     return () => {
       active = false;
     };
-  }, [verifyUrl]);
+  }, [qrPayload]);
 
   const fc = data.template.frontConfig;
   const bc = data.template.backConfig;
@@ -590,23 +589,22 @@ export function FounderIdCardView({
   const [side, setSide] = useState<'front' | 'back'>('front');
   const [qrUrl, setQrUrl] = useState('');
 
-  const verifyUrl = founder.qrToken
-    ? `${window.location.origin}/verify/${founder.qrToken}`
-    : `${window.location.origin}/verify`;
+  const qrPayload = founder.qrToken ? `QIV:${founder.qrToken}` : founder.founderNumber;
 
   const linkedCollege = founder.linkedCollege;
   const isCollegeApproved =
     founder.collegeLinkStatus === 'approved' && Boolean(linkedCollege);
 
   useEffect(() => {
-    QRCode.toDataURL(verifyUrl, {
+    QRCode.toDataURL(qrPayload, {
       width: 180,
       margin: 1,
+      errorCorrectionLevel: 'M',
       color: { dark: '#0B0D12', light: '#F4D57E' },
     })
       .then(setQrUrl)
       .catch(() => {});
-  }, [verifyUrl]);
+  }, [qrPayload]);
 
   const downloadFounderPdf = () => {
     const doc = new jsPDF({ unit: 'mm', format: [85.6, 134] });
@@ -949,15 +947,14 @@ export function PremiumStudentIdCardView({
   const preset = getPremiumStudentDesign(premiumDesign);
   const badgeText = (premiumBadgeLabel || preset.badgeLabel).toUpperCase();
 
-  const verifyUrl = data.qrToken
-    ? `${window.location.origin}/verify/${data.qrToken}`
-    : `${window.location.origin}/verify`;
+  const qrPayload = data.qrToken ? `QIV:${data.qrToken}` : data.student.studentIdCode || data.cardNumber;
 
   useEffect(() => {
     let active = true;
-    QRCode.toDataURL(verifyUrl, {
+    QRCode.toDataURL(qrPayload, {
       width: 180,
       margin: 1,
+      errorCorrectionLevel: 'M',
       color: { dark: preset.qrDark, light: preset.qrLight },
     })
       .then((url) => {
@@ -967,7 +964,7 @@ export function PremiumStudentIdCardView({
     return () => {
       active = false;
     };
-  }, [verifyUrl, preset.qrDark, preset.qrLight]);
+  }, [qrPayload, preset.qrDark, preset.qrLight]);
 
   const handleDownloadPdf = () => {
     const doc = new jsPDF({ unit: 'mm', format: [85.6, 134] });

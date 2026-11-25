@@ -117,11 +117,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn('Google Sign-In redirect check:', formatFirebaseAuthError(err));
     });
 
+    const safetyTimer = window.setTimeout(() => {
+      if (mounted) {
+        setLoading(false);
+      }
+    }, 12_000);
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (!mounted) return;
       if (fbUser) {
         try {
-          await hydrateFromFirestore();
+          await Promise.race([
+            hydrateFromFirestore(),
+            new Promise<never>((_, reject) =>
+              window.setTimeout(() => reject(new Error('Session hydration timed out. Please retry.')), 11_000)
+            ),
+          ]);
         } catch (err) {
           console.error('Failed to hydrate QIVORA Firestore profile:', err);
           if (mounted) {
@@ -130,11 +141,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             applyWorkspace(null);
           }
         } finally {
+          window.clearTimeout(safetyTimer);
           if (mounted) setLoading(false);
         }
         return;
       }
 
+      window.clearTimeout(safetyTimer);
       setUser(null);
       setMemberships([]);
       applyWorkspace(null);
@@ -143,6 +156,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false;
+      window.clearTimeout(safetyTimer);
       unsubscribe();
     };
   }, [applyWorkspace, hydrateFromFirestore]);

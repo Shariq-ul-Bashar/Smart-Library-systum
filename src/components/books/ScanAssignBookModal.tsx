@@ -2,11 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertCircle,
+  ArrowRightLeft,
   BookOpen,
   Camera,
   CheckCircle2,
   Download,
   QrCode,
+  RotateCcw,
   ScanBarcode,
   Search,
   UserCheck,
@@ -32,6 +34,13 @@ interface LookupCopyItem {
   status: string;
   rackCode?: string | null;
   shelfCode?: string | null;
+  activeLoan?: {
+    id: string;
+    studentId: string;
+    studentName?: string;
+    studentRollNumber?: string;
+    dueAt?: string;
+  } | null;
 }
 
 interface CopyLookupResponse {
@@ -92,6 +101,8 @@ export function ScanAssignBookModal({
 
   const [scannerMode, setScannerMode] = useState<'book' | 'student' | null>(null);
   const [issuing, setIssuing] = useState(false);
+  const [returningCopy, setReturningCopy] = useState(false);
+  const [reassigning, setReassigning] = useState(false);
   const [receipt, setReceipt] = useState<{
     receiptNumber: string;
     issuedAt: string;
@@ -187,6 +198,12 @@ export function ScanAssignBookModal({
     (activeCopy?.status === 'available' || activeCopy?.status === 'reserved') &&
     Boolean(studentEligibility?.eligibility.eligible);
 
+  const canReassign =
+    Boolean(activeCopy) &&
+    activeCopy?.status === 'issued' &&
+    Boolean(studentEligibility?.eligibility.eligible) &&
+    activeCopy?.activeLoan?.studentId !== studentEligibility?.student.id;
+
   const handleAssignBook = async () => {
     if (!activeCopy || !studentEligibility) return;
     setIssuing(true);
@@ -215,6 +232,55 @@ export function ScanAssignBookModal({
       toast.error(err instanceof Error ? err.message : 'Unable to assign book.');
     } finally {
       setIssuing(false);
+    }
+  };
+
+  const handleReturnIssuedCopy = async () => {
+    if (!activeCopy?.activeLoan?.id) return;
+    setReturningCopy(true);
+    try {
+      await apiRequest('/org/circulation/return', {
+        method: 'POST',
+        body: { loanId: activeCopy.activeLoan.id },
+      });
+      toast.success(`Copy ${activeCopy.barcode} returned and is now available.`);
+      onAssigned();
+      await handleLookupBook(activeCopy.barcode);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to return copy.');
+    } finally {
+      setReturningCopy(false);
+    }
+  };
+
+  const handleReassignBook = async () => {
+    if (!activeCopy || !studentEligibility) return;
+    setReassigning(true);
+    try {
+      const res = await apiRequest<{
+        receipt: {
+          receiptNumber: string;
+          issuedAt: string;
+          dueAt: string;
+          bookTitle: string;
+          barcode: string;
+          studentName: string;
+          studentIdCode: string;
+        };
+      }>('/org/circulation/reassign', {
+        method: 'POST',
+        body: {
+          bookCopyId: activeCopy.id,
+          studentId: studentEligibility.student.id,
+        },
+      });
+      setReceipt(res.receipt);
+      toast.success(`Copy ${res.receipt.barcode} reassigned to ${res.receipt.studentName}!`);
+      onAssigned();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Unable to reassign book copy.');
+    } finally {
+      setReassigning(false);
     }
   };
 
@@ -386,6 +452,39 @@ export function ScanAssignBookModal({
                       <span>{bookLookup.statusMessage || 'No available copy found for this title.'}</span>
                     </div>
                   )}
+                  {bookLookup.inventory && (
+                    <div className="flex flex-wrap gap-3 text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                      <span>Total: {bookLookup.inventory.total}</span>
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        Available: {bookLookup.inventory.available}
+                      </span>
+                      <span className="text-blue-600 dark:text-blue-400">
+                        Issued: {bookLookup.inventory.issued}
+                      </span>
+                    </div>
+                  )}
+
+                  {activeCopy?.status === 'issued' && activeCopy.activeLoan && (
+                    <div className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 p-2.5 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-[11px] text-amber-900 dark:text-amber-200">
+                        Currently issued to{' '}
+                        <strong>{activeCopy.activeLoan.studentName || 'Active Borrower'}</strong>
+                        {activeCopy.activeLoan.dueAt
+                          ? ` · Due ${formatDate(activeCopy.activeLoan.dueAt)}`
+                          : ''}
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        loading={returningCopy}
+                        onClick={() => void handleReturnIssuedCopy()}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Return Copy Now
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -495,19 +594,31 @@ export function ScanAssignBookModal({
             </div>
 
             {/* Confirm Footer */}
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button
-                type="button"
-                loading={issuing}
-                disabled={!canAssign}
-                onClick={handleAssignBook}
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                Assign &amp; Issue Book to Student
-              </Button>
+              {activeCopy?.status === 'issued' ? (
+                <Button
+                  type="button"
+                  loading={reassigning}
+                  disabled={!canReassign}
+                  onClick={handleReassignBook}
+                >
+                  <ArrowRightLeft className="h-4 w-4" />
+                  Return &amp; Reassign to Student
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  loading={issuing}
+                  disabled={!canAssign}
+                  onClick={handleAssignBook}
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  Assign &amp; Issue Book to Student
+                </Button>
+              )}
             </div>
           </div>
         )}

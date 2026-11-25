@@ -13,8 +13,9 @@ export function ForcePasswordChangeGate() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dismissedForUid, setDismissedForUid] = useState<string | null>(null);
 
-  if (!user || !user.mustChangePassword) return null;
+  if (!user || !user.mustChangePassword || dismissedForUid === user.uid) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,7 +38,7 @@ export function ForcePasswordChangeGate() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      toast.success('Password updated! Your QIVORA workspace is now unlocked.');
+      toast.success('Password updated! Your QIVORA workspace is now secured.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unable to update password.');
     } finally {
@@ -52,7 +53,7 @@ export function ForcePasswordChangeGate() {
           <QivoraLogo size="sm" />
           <span className="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
             <ShieldCheck className="h-3.5 w-3.5" />
-            Security Action Required
+            Temporary Password Notice
           </span>
         </div>
 
@@ -62,8 +63,8 @@ export function ForcePasswordChangeGate() {
           </h2>
           <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
             You signed in to <strong className="text-slate-900 dark:text-white">{user.email}</strong>{' '}
-            using an administrator-issued temporary password. For your account security, you must set a
-            new personal password before accessing QIVORA.
+            using an administrator-issued temporary password. We recommend setting a personal password now,
+            or you can skip and change it anytime from your Profile / Account Settings.
           </p>
         </div>
 
@@ -88,7 +89,7 @@ export function ForcePasswordChangeGate() {
           <Field
             label="New Personal Password"
             required
-            hint="Use uppercase, lowercase, a number, and a special character (min 10 characters recommended)."
+            hint="Use uppercase, lowercase, a number, and a special character (min 8 characters)."
           >
             <Input
               type="password"
@@ -113,11 +114,21 @@ export function ForcePasswordChangeGate() {
             />
           </Field>
 
-          <div className="flex items-center justify-between gap-2 pt-2">
-            <Button type="button" variant="ghost" size="sm" onClick={logout}>
-              <LogOut className="h-3.5 w-3.5" />
-              Sign Out
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+            <div className="flex items-center gap-1.5">
+              <Button type="button" variant="ghost" size="sm" onClick={logout}>
+                <LogOut className="h-3.5 w-3.5" />
+                Sign Out
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setDismissedForUid(user.uid)}
+              >
+                Change Later
+              </Button>
+            </div>
             <Button type="submit" loading={submitting}>
               <KeyRound className="h-4 w-4" />
               Save New Password

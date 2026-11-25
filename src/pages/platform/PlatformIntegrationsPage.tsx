@@ -3,6 +3,7 @@ import { Database, Plug, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Button,
+  EmptyState,
   MetricTile,
   SkeletonRows,
   StatusText,
@@ -26,7 +27,7 @@ interface IntegrationModule {
 export function PlatformIntegrationsPage() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['platform-integrations'],
     queryFn: () => apiRequest<{ integrations: IntegrationModule[] }>('/platform/integrations'),
   });
@@ -45,10 +46,21 @@ export function PlatformIntegrationsPage() {
   });
 
   if (isLoading) return <SkeletonRows rows={6} />;
+  if (isError) {
+    return (
+      <EmptyState
+        title="Integrations Hub unavailable"
+        description="Unable to load integration module status from Cloud Firestore."
+        action={<Button size="sm" onClick={() => refetch()}>Retry</Button>}
+      />
+    );
+  }
 
-  const list = data?.integrations || [];
+  const list = Array.isArray(data?.integrations) ? data.integrations : [];
   const configuredCount = list.filter((i) => i.credentialsConfigured || i.publicFallbackAvailable).length;
-  const activeCount = list.filter((i) => i.status === 'configured_enabled' || (i.publicFallbackAvailable && i.isEnabled)).length;
+  const activeCount = list.filter(
+    (i) => i.status === 'configured_enabled' || (i.publicFallbackAvailable && i.isEnabled)
+  ).length;
 
   return (
     <div className="space-y-6">
@@ -57,7 +69,7 @@ export function PlatformIntegrationsPage() {
           Modular Integrations Hub
         </h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-          Future-ready extension architecture for QIVORA. Modules strictly validate server environment credentials and never simulate unconfigured third-party services.
+          Verified connectors for QIVORA. Modules validate real credentials and gracefully disable unconfigured external services.
         </p>
       </div>
 
@@ -69,7 +81,9 @@ export function PlatformIntegrationsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {list.map((mod) => {
-          const canEnable = mod.credentialsConfigured || mod.publicFallbackAvailable;
+          const envVars = Array.isArray(mod.envVars) ? mod.envVars : [];
+          const missingEnv = Array.isArray(mod.missingEnv) ? mod.missingEnv : [];
+          const canEnable = Boolean(mod.credentialsConfigured || mod.publicFallbackAvailable);
           return (
             <SurfaceCard key={mod.key} className="p-5 flex flex-col justify-between gap-4">
               <div className="space-y-2">
@@ -88,10 +102,10 @@ export function PlatformIntegrationsPage() {
                   {mod.description}
                 </p>
                 <div className="rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-mono text-slate-600 dark:bg-slate-900/70 dark:text-slate-400">
-                  Required Env: {mod.envVars.join(', ')}
-                  {mod.missingEnv.length > 0 && (
+                  Required Env: {envVars.length > 0 ? envVars.join(', ') : 'None (Public API)'}
+                  {missingEnv.length > 0 && (
                     <div className="mt-1 text-amber-700 dark:text-amber-400">
-                      Missing: {mod.missingEnv.join(', ')}
+                      Not configured: {missingEnv.join(', ')}
                       {mod.publicFallbackAvailable ? ' (Public API fallback available)' : ''}
                     </div>
                   )}
@@ -102,7 +116,7 @@ export function PlatformIntegrationsPage() {
                 <span className="text-[11px] text-slate-500">
                   {canEnable
                     ? 'Ready for activation'
-                    : 'Set environment secrets on server to enable'}
+                    : 'Not configured on this Firebase-only deployment'}
                 </span>
                 <Button
                   size="sm"
@@ -128,7 +142,7 @@ export function PlatformIntegrationsPage() {
             Honest Integration Security Policy
           </h3>
           <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-            External API keys and hardware bridge credentials are strictly read from server-side environment variables and never exposed in browser bundles. See <span className="font-mono">docs/PRODUCTION_DEPLOYMENT.md</span> and <span className="font-mono">.env.example</span> for full configuration instructions.
+            Firebase Authentication, Cloud Firestore, and Public ISBN lookup are active directly. Optional external mailers or WhatsApp relays are gracefully disabled until configured, and never simulate fake deliveries.
           </p>
         </div>
       </SurfaceCard>

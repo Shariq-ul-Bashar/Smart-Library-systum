@@ -558,7 +558,7 @@ service cloud.firestore {
             'branding', 'settings', 'departments', 'courses', 'semesters',
             'academicSessions', 'studentCategories', 'categories', 'authors',
             'shelves', 'notificationTemplates', 'notificationPreferences',
-            'automationJobs', 'automationLogs', 'updatedAt'
+            'notificationDeliveries', 'automationJobs', 'automationLogs', 'updatedAt'
           ])
         ) ||
         (
@@ -568,7 +568,8 @@ service cloud.firestore {
           incoming().status == existing().status &&
           incoming().diff(existing()).affectedKeys().hasOnly([
             'categories', 'authors', 'shelves',
-            'notificationPreferences', 'automationJobs', 'automationLogs', 'updatedAt'
+            'notificationPreferences', 'notificationDeliveries',
+            'automationJobs', 'automationLogs', 'updatedAt'
           ])
         )
       );
@@ -777,7 +778,8 @@ service cloud.firestore {
         allow list: if isValidId(orgId) && isOrgStaff(orgId);
         allow create: if isValidId(orgId) && isValidId(paymentId) && orgExists(orgId) &&
           isValidOrgRecord(incoming(), orgId, paymentId) && isOrgStaff(orgId);
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isValidId(orgId) && isValidId(paymentId) && isSuperAdmin();
       }
 
       match /attendance/{attendanceId} {
@@ -795,10 +797,10 @@ service cloud.firestore {
       }
 
       match /migrations/{migrationId} {
-        allow get: if isValidId(orgId) && isValidId(migrationId) && orgExists(orgId) && isOrgAdmin(orgId);
-        allow list: if isValidId(orgId) && isOrgAdmin(orgId);
+        allow get: if isValidId(orgId) && isValidId(migrationId) && orgExists(orgId) && isOrgStaff(orgId);
+        allow list: if isValidId(orgId) && isOrgStaff(orgId);
         allow create, update: if isValidId(orgId) && isValidId(migrationId) && orgExists(orgId) &&
-          isValidOrgRecord(incoming(), orgId, migrationId) && isOrgAdmin(orgId);
+          isValidOrgRecord(incoming(), orgId, migrationId) && isOrgStaff(orgId);
         allow delete: if isValidId(orgId) && isValidId(migrationId) && isSuperAdmin();
       }
 
@@ -815,7 +817,8 @@ service cloud.firestore {
         allow list: if isValidId(orgId) && isOrgStaff(orgId);
         allow create: if isValidId(orgId) && isValidId(logId) && orgExists(orgId) &&
           isValidOrgRecord(incoming(), orgId, logId) && isOrgStaff(orgId);
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if isValidId(orgId) && isValidId(logId) && isSuperAdmin();
       }
     }
   }
